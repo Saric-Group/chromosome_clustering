@@ -149,7 +149,6 @@ velocity	polymers scale ${mytemp}
 fix 		fix_rigid_cyl		cylinders rigid/nve group 2 cyl1 cyl2 force * on off off torque * off off off 	#integrate cylinders as *different* rigid bodies
 fix 		fix_nve				polymers nve 										#integrate polymers
 fix 		fix_langevin 		all langevin ${mytemp} ${mytemp} ${damp} ${lseed} 	#thermostat all
-fix_modify  fix_langevin  		temp realtemp  										#use correct temperature for fix langevin
 
 fix			fix_print 		  			all print ${thermodump} "$(step) $(etotal) $(ke) $(pe) $(temp) $(f_press_av)" & 
  	file ${thermo_file} screen no title "#1:step 2:etot 3:ke 4:pe 5:temp 6:press_av"
