@@ -160,8 +160,8 @@ with open('halfcyl_freepoly_freegraft_ngraft%d_nlayers%d_npolyfreegraft%d_npolyf
 		while(((x>x0_cyl1) and (x<x0_cyl1+(radius+0.5))) or (((x>x0_cyl2-(radius+0.5)) and (x<x0_cyl2)))): #Pick again if inside cylinder
 			x=random()*box_x
 		y=random()*box_yz
-		while(((y>box_yz/4.-(radius+0.5)) and (y<box_yz/4.+(radius+0.5))) or (((y>3*box_yz/4.-(radius+0.5)) and (y<3*box_yz/4.+(radius+0.5))))): #Pick again if inside cylinder
-			y=random()*box_yz
+#		while(((y>box_yz/4.-(radius+0.5)) and (y<box_yz/4.+(radius+0.5))) or (((y>3*box_yz/4.-(radius+0.5)) and (y<3*box_yz/4.+(radius+0.5))))): #Pick again if inside cylinder
+#			y=random()*box_yz
 		r0=array([x,y,z])
 		fout.write("%d %d 3 %f %.15f %.15f %.15f\n"%(atom_id,mol_id,poly_charge_free,x,y,z))
 		for n in range(1,polymer_length_free):
