@@ -1,0 +1,213 @@
+#Simulate a frozen surface with grafted polymer chains
+
+#####################################################
+#PARAMETERS
+
+#NUMBER OF STEPS OF RUNS
+variable nsteps_unoverlap	equal 	1e5	#Unoverlap run steps
+variable nsteps_eq			equal 	5e7	#Equilibration run steps
+
+#THERMODYNAMIC PARAMETERS
+variable mytemp         equal 	1.0	    	#Temperature
+
+#INFORMATION PRINTING PERIODS
+variable thermodump     equal   $(v_nsteps_eq/5e4)			#Thermo info dump period
+variable nevery_thermo  equal   $(v_thermodump/100) 		#Use input values to av. thermo quantities every this many time steps
+variable nrepeat_thermo equal   $(v_thermodump/v_nevery_thermo) #Number of times to use input values for calculating averages
+variable trajdump       equal   $(floor(v_nsteps_eq/50)) 	#Config info dump period
+variable trestart       equal   $(floor((v_nsteps_eq/5.)))   #Restart configuration saving period
+
+#INTERACTION POTENTIALS PARAMETERS
+variable lj_cutoff      equal   1.122462048	#Lennard-Jones cutoff. For WCA: 1.122462048 
+variable cd_cutoff		equal	3.0 		#Coulomb-Debye cutoff 
+variable kappa			equal	2.0 		#Debye constant (inverse length)
+variable angle_energy 	equal	2.0
+variable prefactor 		equal 	ramp(0,100) #Prefactor of the soft potential used to remove overlaps
+
+#OTHER SIMULATION PARAMETERS
+variable tstep        	equal   0.002   	#Integration time step
+variable damp   		equal   0.1	   		#Langevin thermostat damping coefficient [F_friction = -(m/damp)*v]
+variable neigh_cutoff	equal	0.4  		#Neighbor list cutoff
+variable nve_lim		equal	0.05		#Max distance an atom can move in a time step during NVE integration
+variable comm_cutoff	equal   2.0 		#Ghost cutoff (see https://docs.lammps.org/comm_modify.html) 
+
+#SEEDS
+variable lseed			file 	lseed.dat		#Seed for fix langevin
+variable vseed			file	vseed.dat		#Seed for creation of velocities
+
+#STRINGS
+variable fname 				string 	data				#name of the data file to be read to start the simulation
+variable thermo_file     	string  thermo.dat			#name of the file with thermodynamic infos
+variable stress_file		string  stress.dat
+variable stress_virial_file string  stress_virial.dat   #name of the file with stress tensor infos
+variable simname 			string 	eq_2SFPU5			#name of this simulation
+
+#VARIABLES FOR LOG TIMES
+variable log_times_file			file 	log_times_${nsteps_eq}_50_1.times
+variable logdump				equal 	"next(log_times_file)"
+#####################################################
+#INITALIZATION
+units           lj          	#use lj units
+boundary        p p f       	#periodic boundary conditions in x an y direction, fixed in z direction
+atom_style     	full  			#molecular+charge
+
+#BOND STYLE: 
+special_bonds   fene
+bond_style      fene
+angle_style		cosine/shift
+
+#Starting from an initial configuration (format lammpsdata):
+
+#Restarting a previous simulation:
+#read_restart    ${fname}
+#reset_timestep  0
+
+read_data       ${fname}
+
+#DEFINE GROUPS
+group 			surface 	type 1
+group           grafted  	type 2 4
+group 			polymers 	type 2 3 4
+
+#BONDS AND ANGLES
+bond_coeff    	1 30.0 1.5 1.0 1.0 
+angle_coeff	  	1 -${angle_energy} 3.141693
+
+#SET TIME STEP
+timestep		${tstep}
+
+#PAIR STYLE FOR UNOVERLAP
+pair_style  	hybrid soft 1.0 lj/cut ${lj_cutoff}
+
+#PAIR POTENTIALS FOR UNOVERLAP
+pair_coeff		2 2 soft 0.0 ${lj_cutoff}
+pair_coeff		2 3 soft 0.0 ${lj_cutoff}
+pair_coeff		2 4 soft 0.0 ${lj_cutoff}
+pair_coeff		3 3 soft 0.0 ${lj_cutoff}
+pair_coeff		3 4 soft 0.0 ${lj_cutoff}
+pair_coeff		4 4 soft 0.0 ${lj_cutoff}
+
+pair_coeff 		1 1 lj/cut 1.0 1.0 ${lj_cutoff} #Interaction not actually computed
+pair_coeff 		1 2 lj/cut 1.0 1.0 ${lj_cutoff} 
+pair_coeff 		1 3 lj/cut 1.0 1.0 ${lj_cutoff}
+pair_coeff 		1 4 lj/cut 1.0 1.0 ${lj_cutoff}
+
+pair_modify		pair lj/cut shift yes
+
+#NEIGHBOR LISTS
+neighbor		${neigh_cutoff} bin 							#value = skin = extra distance beyond cutoff
+neigh_modify	every 10 delay 0 check yes
+neigh_modify	exclude group surface surface 	#Do not compute interaction between surface particles
+
+comm_modify     cutoff ${comm_cutoff} 	#Extend ghost cutoff
+
+#PERFORM ENERGY MINIMIZATION
+print "Start energy minimization"
+fix   			freeze 	surface setforce 0 0 0 	#Freeze surface particles
+minimize 		1.0e-6 1.0e-8 1000 100000 #etol ftol maxiter maxeval
+reset_timestep 	0
+print "Energy minimzation successful"
+
+#COMPUTES
+compute 		realtemp 		polymers temp/partial 1 1 1 	#Compute temperature excluding frozen atoms
+
+#THERMODYNAMIC INFO
+thermo_style	custom step etotal temp c_realtemp press
+thermo			${thermodump}
+thermo_modify	norm no
+
+##################################################
+#UNOVERLAP-START
+##################################################
+print "Start unoverlap"
+
+fix 		fix_nve_lim 		polymers nve/limit ${nve_lim}
+fix 		fix_langevin 		polymers langevin ${mytemp} ${mytemp} ${damp} ${lseed} 
+
+fix 		fix_unoverlap_22 	polymers adapt 1 pair soft a 2 2 v_prefactor #changes prefactor every 1 timestep
+fix 		fix_unoverlap_23 	polymers adapt 1 pair soft a 2 3 v_prefactor #changes prefactor every 1 timestep
+fix 		fix_unoverlap_24 	polymers adapt 1 pair soft a 2 4 v_prefactor #changes prefactor every 1 timestep
+fix 		fix_unoverlap_33 	polymers adapt 1 pair soft a 3 3 v_prefactor #changes prefactor every 1 timestep
+fix 		fix_unoverlap_34 	polymers adapt 1 pair soft a 3 4 v_prefactor #changes prefactor every 1 timestep
+fix 		fix_unoverlap_44 	polymers adapt 1 pair soft a 4 4 v_prefactor #changes prefactor every 1 timestep
+
+#CREATE VELOCITIES USING MAXWELL-BOLTZMANN DISTRIBUTION
+velocity 	polymers create ${mytemp} ${vseed} dist gaussian mom yes rot yes 
+run 0
+velocity	polymers scale ${mytemp}
+
+run			${nsteps_unoverlap}
+
+unfix		fix_unoverlap_22
+unfix		fix_unoverlap_23
+unfix		fix_unoverlap_24
+unfix		fix_unoverlap_33
+unfix		fix_unoverlap_34
+unfix		fix_unoverlap_44
+
+reset_timestep 0
+
+print "Unoverlap successful"
+
+
+##################################################
+#EQUILIBRATION-START
+##################################################
+print "Start equilibration"
+
+#DEFINITION OF VARIABLES FOR USE IN FIX PRINT
+variable		press equal press
+
+#Elements of the stress tensor
+variable p_xx	equal pxx
+variable p_yy	equal pyy
+variable p_zz	equal pzz
+variable p_xy	equal pxy
+variable p_xz	equal pxz
+variable p_yz	equal pyz
+
+#AVERAGE PRESSURE AND STRESS
+fix 	press_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_press
+fix 	p_xx_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xx
+fix 	p_yy_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_yy
+fix 	p_zz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_zz
+fix 	p_xy_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xy
+fix 	p_xz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xz
+fix 	p_yz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_yz
+
+#PAIR STYLE FOR EQUILIBRATION
+pair_style     	lj/cut ${lj_cutoff} #These cutoff values are overwritten by the ones specified in the pair_coeff commands
+
+#PAIR POTENTIALS FOR EQUILIBRATION
+pair_coeff      * * 1.0 1.0 ${lj_cutoff} #surf-surf (Interaction not actually computed)
+pair_modify		shift yes
+
+fix			fix_print 		  			all print ${thermodump} "$(step) $(etotal) $(ke) $(pe) $(c_realtemp) $(f_press_av)" & 
+ 	file ${thermo_file} screen no title "#1:step 2:etot 3:ke 4:pe 5:temp 6:press_av"
+fix			fix_print_stress			all print ${thermodump} "$(step) $(f_p_xx_av) $(f_p_yy_av) $(f_p_zz_av) $(f_p_xy_av) $(f_p_xz_av) $(f_p_yz_av)" & 
+	file ${stress_file} screen no title "#1:step 2:p_xx 3:p_yy 4:p_zz 5:p_xy 6:p_xz 7:p_yz"
+
+#Save configurations in logarithmic time
+dump       	1 polymers custom ${trajdump} dump/dump.${simname}.*.lammpstrj type mol xu yu zu
+dump_modify	1 sort id
+dump_modify	1 format line "%d %d %.8f %.8f %.8f"
+dump_modify	1 pad 10
+dump_modify	1 every v_logdump
+
+#Save configurations in linear time
+dump		2 polymers custom ${trajdump} dumplin/dump.${simname}.*.lammpstrj type mol xu yu zu
+dump_modify	2 sort id
+dump_modify	2 pad 10
+dump_modify	2 format line "%d %d %.8f %.8f %.8f"
+
+restart    	${trestart} restart/${simname}.*.restart
+
+run			${nsteps_eq}
+
+##################################################
+
+write_data      data.${simname}
+write_restart	restart/restart.${simname}
+
+
+

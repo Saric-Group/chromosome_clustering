@@ -1,0 +1,3183 @@
+#Simulate a frozen surface with grafted polymer chains
+
+#####################################################
+#PARAMETERS
+
+#NUMBER OF STEPS OF RUNS
+variable nsteps			equal 	3e8	#NVT run steps
+
+#THERMODYNAMIC PARAMETERS
+variable mytemp         equal 	1.0	    	#Temperature
+
+#INFORMATION PRINTING PERIODS
+variable thermodump     equal   $(v_nsteps/3e5)					#Thermo info dump period
+variable nevery_thermo  equal   $(v_thermodump/10) 				#Use input values to av. thermo quantities every this many time steps
+variable nrepeat_thermo equal   $(v_thermodump/v_nevery_thermo) #Number of times to use input values for calculating averages
+variable trajdump       equal   $(floor(v_nsteps/150)) 			#Config info dump period
+variable trestart       equal   $(floor(v_nsteps/10.))   		#Restart configuration saving period
+
+#INTERACTION POTENTIALS PARAMETERS
+variable lj_cutoff      equal   1.122462048	#Lennard-Jones cutoff. For WCA: 1.122462048 
+variable cd_cutoff		equal	3.0 		#Coulomb-Debye cutoff 
+variable kappa			equal	2.0 		#Debye constant (inverse length)
+variable angle_energy 	equal	2.0
+
+#OTHER SIMULATION PARAMETERS
+variable tstep        	equal   0.002   	#Integration time step
+variable damp   		equal   0.1	   		#Langevin thermostat damping coefficient [F_friction = -(m/damp)*v]
+variable neigh_cutoff	equal	0.4  		#Neighbor list cutoff
+variable comm_cutoff	equal   2.0 		#Ghost cutoff (see https://docs.lammps.org/comm_modify.html) 
+variable diel_const 	file  	dielectric.dat #Dielectric constant
+
+#CHARGE FILES
+variable poly_charge  		file 	poly_charge.dat 	#Charge of grafted polymers (excluding B5 bead)
+variable b5_charge      	file  	b5_charge.dat 		#Charge of the B5 bead
+variable surface_charge    	file    surface_charge.dat 	#Surface charge
+variable poly_charge_free 	file  	poly_charge_free.dat #Charge of free polymers
+
+#SEEDS
+variable lseed			file 	lseed.dat		#Seed for fix langevin
+variable vseed			file	vseed.dat		#Seed for creation of velocities
+
+#STRINGS
+variable fname 				string 	data			#name of the data file to be read to start the simulation
+variable thermo_file     	string  thermo.dat		#name of the file with thermodynamic infos
+variable stress_file		string  stress.dat 		#name of the file with stress tensor infos
+variable simname 			string 	run_2SFPU5_VC	#name of this simulation
+
+#VARIABLES FOR LOG TIMES
+variable log_times_file			file 	log_times_${nsteps}_600_1.times
+variable logdump				equal 	"next(log_times_file)"
+#####################################################
+#INITALIZATION
+units           lj          	#use lj units
+boundary        p p f       	#periodic boundary conditions in x an y direction, fixed in z direction
+atom_style     	full  			#molecular+charge
+
+#BOND STYLE: 
+special_bonds   fene
+bond_style      fene
+angle_style		cosine/shift
+
+#Starting from an initial configuration (format lammpsdata):
+#read_data       ${fname}
+
+#Restarting a previous simulation:
+read_restart    ${fname}
+reset_timestep  0
+
+#DEFINE GROUPS
+group 			surface 	type 1
+group           grafted  	type 2 4
+group 			polymers 	type 2 3 4
+
+#SET DIELECTRIC CONSTANT
+dielectric  	${diel_const}
+
+#SET TIME STEP
+timestep		${tstep}
+
+#SET CHARGES
+set type 1 charge ${surface_charge}
+set type 2 charge ${poly_charge}
+set type 3 charge ${poly_charge_free}
+set type 4 charge ${b5_charge}
+
+#PAIR STYLE
+pair_style     	hybrid lj/cut ${lj_cutoff} lj/cut/coul/debye ${kappa} ${lj_cutoff} ${cd_cutoff} #These cutoff values are overwritten by the ones specified in the pair_coeff commands
+
+#PAIR POTENTIALS PARAMETERS
+pair_coeff      1 1 lj/cut 1.0 1.0 ${lj_cutoff} 						#surf-surf (Interaction not actually computed)
+pair_coeff      1 2 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #surf-grafted
+pair_coeff      1 3 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #surf-free
+pair_coeff      1 4 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #surf-grafted_b5
+pair_coeff 	2 2 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #grafted-grafted
+pair_coeff      2 3 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #grafted-free
+pair_coeff 	2 4 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #grafted-grafted_b5
+pair_coeff      3 3 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #free-free
+pair_coeff      3 4 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #free-grafted_b5
+pair_coeff      4 4 lj/cut/coul/debye 1.0 1.0 ${lj_cutoff} ${cd_cutoff} #grafted_b5-grafted_b5
+
+pair_modify		pair lj/cut/coul/debye shift yes
+pair_modify		pair lj/cut shift yes
+
+#NEIGHBOR LISTS
+neighbor		${neigh_cutoff} bin 							#value = skin = extra distance beyond cutoff
+neigh_modify	every 10 delay 0 check yes
+neigh_modify	exclude group surface surface 	#Do not compute interaction between surface particles
+
+comm_modify     cutoff ${comm_cutoff} 					#Extend ghost cutoff
+
+#BONDS AND ANGLES
+bond_coeff    	1 30.0 1.5 1.0 1.0 
+angle_coeff	  	1 -${angle_energy} 3.141693
+
+#COMPUTE
+compute 		realtemp 	polymers temp/partial 1 1 1 	#Compute temperature excluding frozen atoms
+
+####-PRINTING STUFF-##############################
+
+#DEFINITION OF VARIABLES FOR USE IN FIX PRINT
+variable		press equal press
+
+#Elements of the stress tensor
+variable p_xx	equal pxx
+variable p_yy	equal pyy
+variable p_zz	equal pzz
+variable p_xy	equal pxy
+variable p_xz	equal pxz
+variable p_yz	equal pyz
+
+#AVERAGE PRESSURE AND STRESS
+fix 	press_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_press
+
+fix 	p_xx_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xx
+fix 	p_yy_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_yy
+fix 	p_zz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_zz
+fix 	p_xy_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xy
+fix 	p_xz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_xz
+fix 	p_yz_av 		all ave/time ${nevery_thermo} ${nrepeat_thermo} ${thermodump} v_p_yz
+
+#THERMODYNAMIC INFO
+thermo_style	custom step etotal temp c_realtemp press
+thermo			${thermodump}
+thermo_modify	norm no
+
+##################################################
+#NVT (NVE+LANGEVIN) RUN
+
+fix 	fix_nve 		polymers nve
+fix 	fix_langevin 	polymers langevin ${mytemp} ${mytemp} ${damp} ${lseed} 
+
+#CREATE VELOCITIES USING MAXWELL-BOLTZMANN DISTRIBUTION
+velocity 	polymers create ${mytemp} ${vseed} dist gaussian mom yes rot yes 
+run 0
+velocity	polymers scale ${mytemp}
+
+fix			fix_print 		  			all print ${thermodump} "$(step) $(etotal) $(ke) $(pe) $(c_realtemp) $(f_press_av)" & 
+ 	file ${thermo_file} screen no title "#1:step 2:etot 3:ke 4:pe 5:temp 6:press_av"
+fix			fix_print_stress			all print ${thermodump} "$(step) $(f_p_xx_av) $(f_p_yy_av) $(f_p_zz_av) $(f_p_xy_av) $(f_p_xz_av) $(f_p_yz_av)" & 
+	file ${stress_file} screen no title "#1:step 2:p_xx 3:p_yy 4:p_zz 5:p_xy 6:p_xz 7:p_yz"
+
+#Save configurations in logarithmic time
+dump       	1 all custom ${trajdump} dump/dump.${simname}.*.lammpstrj type mol xu yu zu
+dump_modify	1 sort id
+dump_modify	1 format line "%d %d %.8f %.8f %.8f"
+dump_modify	1 pad 10
+dump_modify	1 every v_logdump
+
+#Save configurations in linear time
+dump		2 all custom ${trajdump} dumplin/dump.${simname}.*.lammpstrj type mol xu yu zu
+dump_modify	2 sort id
+dump_modify	2 pad 10
+dump_modify	2 format line "%d %d %.8f %.8f %.8f"
+
+restart    	${trestart} restart/${simname}.*.restart
+
+run 300000
+set type 2 charge -8.536451
+set type 4 charge 6.175633
+run 300000
+set type 2 charge -8.536440
+set type 4 charge 6.175650
+run 300000
+set type 2 charge -8.536428
+set type 4 charge 6.175667
+run 300000
+set type 2 charge -8.536416
+set type 4 charge 6.175684
+run 300000
+set type 2 charge -8.536404
+set type 4 charge 6.175702
+run 300000
+set type 2 charge -8.536391
+set type 4 charge 6.175720
+run 300000
+set type 2 charge -8.536379
+set type 4 charge 6.175739
+run 300000
+set type 2 charge -8.536366
+set type 4 charge 6.175758
+run 300000
+set type 2 charge -8.536353
+set type 4 charge 6.175777
+run 300000
+set type 2 charge -8.536339
+set type 4 charge 6.175797
+run 300000
+set type 2 charge -8.536325
+set type 4 charge 6.175817
+run 300000
+set type 2 charge -8.536311
+set type 4 charge 6.175838
+run 300000
+set type 2 charge -8.536297
+set type 4 charge 6.175859
+run 300000
+set type 2 charge -8.536283
+set type 4 charge 6.175880
+run 300000
+set type 2 charge -8.536268
+set type 4 charge 6.175902
+run 300000
+set type 2 charge -8.536252
+set type 4 charge 6.175924
+run 300000
+set type 2 charge -8.536237
+set type 4 charge 6.175947
+run 300000
+set type 2 charge -8.536221
+set type 4 charge 6.175970
+run 300000
+set type 2 charge -8.536205
+set type 4 charge 6.175994
+run 300000
+set type 2 charge -8.536189
+set type 4 charge 6.176018
+run 300000
+set type 2 charge -8.536172
+set type 4 charge 6.176042
+run 300000
+set type 2 charge -8.536155
+set type 4 charge 6.176067
+run 300000
+set type 2 charge -8.536137
+set type 4 charge 6.176093
+run 300000
+set type 2 charge -8.536119
+set type 4 charge 6.176119
+run 300000
+set type 2 charge -8.536101
+set type 4 charge 6.176146
+run 300000
+set type 2 charge -8.536083
+set type 4 charge 6.176173
+run 300000
+set type 2 charge -8.536064
+set type 4 charge 6.176201
+run 300000
+set type 2 charge -8.536045
+set type 4 charge 6.176229
+run 300000
+set type 2 charge -8.536025
+set type 4 charge 6.176258
+run 300000
+set type 2 charge -8.536005
+set type 4 charge 6.176287
+run 300000
+set type 2 charge -8.535984
+set type 4 charge 6.176317
+run 300000
+set type 2 charge -8.535963
+set type 4 charge 6.176348
+run 300000
+set type 2 charge -8.535942
+set type 4 charge 6.176379
+run 300000
+set type 2 charge -8.535920
+set type 4 charge 6.176411
+run 300000
+set type 2 charge -8.535898
+set type 4 charge 6.176444
+run 300000
+set type 2 charge -8.535876
+set type 4 charge 6.176477
+run 300000
+set type 2 charge -8.535852
+set type 4 charge 6.176511
+run 300000
+set type 2 charge -8.535829
+set type 4 charge 6.176545
+run 300000
+set type 2 charge -8.535805
+set type 4 charge 6.176581
+run 300000
+set type 2 charge -8.535780
+set type 4 charge 6.176617
+run 300000
+set type 2 charge -8.535755
+set type 4 charge 6.176653
+run 300000
+set type 2 charge -8.535730
+set type 4 charge 6.176691
+run 300000
+set type 2 charge -8.535704
+set type 4 charge 6.176729
+run 300000
+set type 2 charge -8.535677
+set type 4 charge 6.176768
+run 300000
+set type 2 charge -8.535650
+set type 4 charge 6.176808
+run 300000
+set type 2 charge -8.535622
+set type 4 charge 6.176848
+run 300000
+set type 2 charge -8.535594
+set type 4 charge 6.176889
+run 300000
+set type 2 charge -8.535565
+set type 4 charge 6.176932
+run 300000
+set type 2 charge -8.535536
+set type 4 charge 6.176975
+run 300000
+set type 2 charge -8.535506
+set type 4 charge 6.177019
+run 300000
+set type 2 charge -8.535475
+set type 4 charge 6.177063
+run 300000
+set type 2 charge -8.535444
+set type 4 charge 6.177109
+run 300000
+set type 2 charge -8.535412
+set type 4 charge 6.177156
+run 300000
+set type 2 charge -8.535380
+set type 4 charge 6.177203
+run 300000
+set type 2 charge -8.535347
+set type 4 charge 6.177252
+run 300000
+set type 2 charge -8.535313
+set type 4 charge 6.177301
+run 300000
+set type 2 charge -8.535279
+set type 4 charge 6.177352
+run 300000
+set type 2 charge -8.535244
+set type 4 charge 6.177403
+run 300000
+set type 2 charge -8.535208
+set type 4 charge 6.177456
+run 300000
+set type 2 charge -8.535171
+set type 4 charge 6.177510
+run 300000
+set type 2 charge -8.535134
+set type 4 charge 6.177564
+run 300000
+set type 2 charge -8.535096
+set type 4 charge 6.177620
+run 300000
+set type 2 charge -8.535057
+set type 4 charge 6.177677
+run 300000
+set type 2 charge -8.535017
+set type 4 charge 6.177735
+run 300000
+set type 2 charge -8.534977
+set type 4 charge 6.177795
+run 300000
+set type 2 charge -8.534936
+set type 4 charge 6.177855
+run 300000
+set type 2 charge -8.534893
+set type 4 charge 6.177917
+run 300000
+set type 2 charge -8.534850
+set type 4 charge 6.177980
+run 300000
+set type 2 charge -8.534807
+set type 4 charge 6.178044
+run 300000
+set type 2 charge -8.534762
+set type 4 charge 6.178109
+run 300000
+set type 2 charge -8.534716
+set type 4 charge 6.178176
+run 300000
+set type 2 charge -8.534670
+set type 4 charge 6.178244
+run 300000
+set type 2 charge -8.534622
+set type 4 charge 6.178314
+run 300000
+set type 2 charge -8.534574
+set type 4 charge 6.178385
+run 300000
+set type 2 charge -8.534525
+set type 4 charge 6.178457
+run 300000
+set type 2 charge -8.534474
+set type 4 charge 6.178531
+run 300000
+set type 2 charge -8.534423
+set type 4 charge 6.178607
+run 300000
+set type 2 charge -8.534370
+set type 4 charge 6.178683
+run 300000
+set type 2 charge -8.534317
+set type 4 charge 6.178762
+run 300000
+set type 2 charge -8.534262
+set type 4 charge 6.178842
+run 300000
+set type 2 charge -8.534207
+set type 4 charge 6.178924
+run 300000
+set type 2 charge -8.534150
+set type 4 charge 6.179007
+run 300000
+set type 2 charge -8.534092
+set type 4 charge 6.179092
+run 300000
+set type 2 charge -8.534033
+set type 4 charge 6.179178
+run 300000
+set type 2 charge -8.533973
+set type 4 charge 6.179267
+run 300000
+set type 2 charge -8.533911
+set type 4 charge 6.179357
+run 300000
+set type 2 charge -8.533848
+set type 4 charge 6.179449
+run 300000
+set type 2 charge -8.533784
+set type 4 charge 6.179543
+run 300000
+set type 2 charge -8.533719
+set type 4 charge 6.179639
+run 300000
+set type 2 charge -8.533652
+set type 4 charge 6.179737
+run 300000
+set type 2 charge -8.533584
+set type 4 charge 6.179836
+run 300000
+set type 2 charge -8.533515
+set type 4 charge 6.179938
+run 300000
+set type 2 charge -8.533444
+set type 4 charge 6.180042
+run 300000
+set type 2 charge -8.533372
+set type 4 charge 6.180148
+run 300000
+set type 2 charge -8.533298
+set type 4 charge 6.180256
+run 300000
+set type 2 charge -8.533223
+set type 4 charge 6.180366
+run 300000
+set type 2 charge -8.533146
+set type 4 charge 6.180478
+run 300000
+set type 2 charge -8.533068
+set type 4 charge 6.180593
+run 300000
+set type 2 charge -8.532988
+set type 4 charge 6.180710
+run 300000
+set type 2 charge -8.532907
+set type 4 charge 6.180829
+run 300000
+set type 2 charge -8.532824
+set type 4 charge 6.180951
+run 300000
+set type 2 charge -8.532739
+set type 4 charge 6.181075
+run 300000
+set type 2 charge -8.532653
+set type 4 charge 6.181202
+run 300000
+set type 2 charge -8.532565
+set type 4 charge 6.181331
+run 300000
+set type 2 charge -8.532475
+set type 4 charge 6.181463
+run 300000
+set type 2 charge -8.532383
+set type 4 charge 6.181597
+run 300000
+set type 2 charge -8.532289
+set type 4 charge 6.181735
+run 300000
+set type 2 charge -8.532194
+set type 4 charge 6.181875
+run 300000
+set type 2 charge -8.532096
+set type 4 charge 6.182018
+run 300000
+set type 2 charge -8.531997
+set type 4 charge 6.182163
+run 300000
+set type 2 charge -8.531896
+set type 4 charge 6.182312
+run 300000
+set type 2 charge -8.531792
+set type 4 charge 6.182464
+run 300000
+set type 2 charge -8.531687
+set type 4 charge 6.182618
+run 300000
+set type 2 charge -8.531579
+set type 4 charge 6.182776
+run 300000
+set type 2 charge -8.531469
+set type 4 charge 6.182937
+run 300000
+set type 2 charge -8.531357
+set type 4 charge 6.183102
+run 300000
+set type 2 charge -8.531243
+set type 4 charge 6.183269
+run 300000
+set type 2 charge -8.531126
+set type 4 charge 6.183440
+run 300000
+set type 2 charge -8.531007
+set type 4 charge 6.183615
+run 300000
+set type 2 charge -8.530886
+set type 4 charge 6.183793
+run 300000
+set type 2 charge -8.530762
+set type 4 charge 6.183974
+run 300000
+set type 2 charge -8.530636
+set type 4 charge 6.184159
+run 300000
+set type 2 charge -8.530507
+set type 4 charge 6.184348
+run 300000
+set type 2 charge -8.530375
+set type 4 charge 6.184541
+run 300000
+set type 2 charge -8.530241
+set type 4 charge 6.184738
+run 300000
+set type 2 charge -8.530104
+set type 4 charge 6.184939
+run 300000
+set type 2 charge -8.529965
+set type 4 charge 6.185143
+run 300000
+set type 2 charge -8.529822
+set type 4 charge 6.185352
+run 300000
+set type 2 charge -8.529677
+set type 4 charge 6.185565
+run 300000
+set type 2 charge -8.529529
+set type 4 charge 6.185782
+run 300000
+set type 2 charge -8.529377
+set type 4 charge 6.186004
+run 300000
+set type 2 charge -8.529223
+set type 4 charge 6.186230
+run 300000
+set type 2 charge -8.529066
+set type 4 charge 6.186461
+run 300000
+set type 2 charge -8.528905
+set type 4 charge 6.186696
+run 300000
+set type 2 charge -8.528741
+set type 4 charge 6.186937
+run 300000
+set type 2 charge -8.528574
+set type 4 charge 6.187182
+run 300000
+set type 2 charge -8.528404
+set type 4 charge 6.187432
+run 300000
+set type 2 charge -8.528230
+set type 4 charge 6.187687
+run 300000
+set type 2 charge -8.528052
+set type 4 charge 6.187947
+run 300000
+set type 2 charge -8.527871
+set type 4 charge 6.188212
+run 300000
+set type 2 charge -8.527687
+set type 4 charge 6.188483
+run 300000
+set type 2 charge -8.527498
+set type 4 charge 6.188759
+run 300000
+set type 2 charge -8.527306
+set type 4 charge 6.189041
+run 300000
+set type 2 charge -8.527110
+set type 4 charge 6.189328
+run 300000
+set type 2 charge -8.526910
+set type 4 charge 6.189621
+run 300000
+set type 2 charge -8.526706
+set type 4 charge 6.189921
+run 300000
+set type 2 charge -8.526498
+set type 4 charge 6.190226
+run 300000
+set type 2 charge -8.526286
+set type 4 charge 6.190537
+run 300000
+set type 2 charge -8.526069
+set type 4 charge 6.190855
+run 300000
+set type 2 charge -8.525848
+set type 4 charge 6.191179
+run 300000
+set type 2 charge -8.525622
+set type 4 charge 6.191509
+run 300000
+set type 2 charge -8.525392
+set type 4 charge 6.191847
+run 300000
+set type 2 charge -8.525158
+set type 4 charge 6.192191
+run 300000
+set type 2 charge -8.524918
+set type 4 charge 6.192542
+run 300000
+set type 2 charge -8.524674
+set type 4 charge 6.192900
+run 300000
+set type 2 charge -8.524425
+set type 4 charge 6.193265
+run 300000
+set type 2 charge -8.524171
+set type 4 charge 6.193637
+run 300000
+set type 2 charge -8.523912
+set type 4 charge 6.194018
+run 300000
+set type 2 charge -8.523647
+set type 4 charge 6.194405
+run 300000
+set type 2 charge -8.523377
+set type 4 charge 6.194801
+run 300000
+set type 2 charge -8.523102
+set type 4 charge 6.195205
+run 300000
+set type 2 charge -8.522821
+set type 4 charge 6.195616
+run 300000
+set type 2 charge -8.522535
+set type 4 charge 6.196036
+run 300000
+set type 2 charge -8.522243
+set type 4 charge 6.196465
+run 300000
+set type 2 charge -8.521944
+set type 4 charge 6.196902
+run 300000
+set type 2 charge -8.521640
+set type 4 charge 6.197348
+run 300000
+set type 2 charge -8.521330
+set type 4 charge 6.197803
+run 300000
+set type 2 charge -8.521013
+set type 4 charge 6.198267
+run 300000
+set type 2 charge -8.520691
+set type 4 charge 6.198740
+run 300000
+set type 2 charge -8.520361
+set type 4 charge 6.199223
+run 300000
+set type 2 charge -8.520025
+set type 4 charge 6.199716
+run 300000
+set type 2 charge -8.519682
+set type 4 charge 6.200218
+run 300000
+set type 2 charge -8.519333
+set type 4 charge 6.200731
+run 300000
+set type 2 charge -8.518976
+set type 4 charge 6.201254
+run 300000
+set type 2 charge -8.518612
+set type 4 charge 6.201788
+run 300000
+set type 2 charge -8.518241
+set type 4 charge 6.202332
+run 300000
+set type 2 charge -8.517862
+set type 4 charge 6.202887
+run 300000
+set type 2 charge -8.517475
+set type 4 charge 6.203454
+run 300000
+set type 2 charge -8.517081
+set type 4 charge 6.204032
+run 300000
+set type 2 charge -8.516679
+set type 4 charge 6.204621
+run 300000
+set type 2 charge -8.516269
+set type 4 charge 6.205223
+run 300000
+set type 2 charge -8.515850
+set type 4 charge 6.205836
+run 300000
+set type 2 charge -8.515424
+set type 4 charge 6.206462
+run 300000
+set type 2 charge -8.514988
+set type 4 charge 6.207101
+run 300000
+set type 2 charge -8.514544
+set type 4 charge 6.207752
+run 300000
+set type 2 charge -8.514091
+set type 4 charge 6.208416
+run 300000
+set type 2 charge -8.513628
+set type 4 charge 6.209094
+run 300000
+set type 2 charge -8.513157
+set type 4 charge 6.209786
+run 300000
+set type 2 charge -8.512676
+set type 4 charge 6.210491
+run 300000
+set type 2 charge -8.512185
+set type 4 charge 6.211211
+run 300000
+set type 2 charge -8.511684
+set type 4 charge 6.211945
+run 300000
+set type 2 charge -8.511174
+set type 4 charge 6.212693
+run 300000
+set type 2 charge -8.510653
+set type 4 charge 6.213457
+run 300000
+set type 2 charge -8.510121
+set type 4 charge 6.214236
+run 300000
+set type 2 charge -8.509579
+set type 4 charge 6.215031
+run 300000
+set type 2 charge -8.509026
+set type 4 charge 6.215842
+run 300000
+set type 2 charge -8.508462
+set type 4 charge 6.216669
+run 300000
+set type 2 charge -8.507886
+set type 4 charge 6.217513
+run 300000
+set type 2 charge -8.507299
+set type 4 charge 6.218374
+run 300000
+set type 2 charge -8.506700
+set type 4 charge 6.219252
+run 300000
+set type 2 charge -8.506089
+set type 4 charge 6.220148
+run 300000
+set type 2 charge -8.505466
+set type 4 charge 6.221061
+run 300000
+set type 2 charge -8.504830
+set type 4 charge 6.221993
+run 300000
+set type 2 charge -8.504182
+set type 4 charge 6.222944
+run 300000
+set type 2 charge -8.503520
+set type 4 charge 6.223914
+run 300000
+set type 2 charge -8.502845
+set type 4 charge 6.224904
+run 300000
+set type 2 charge -8.502157
+set type 4 charge 6.225913
+run 300000
+set type 2 charge -8.501455
+set type 4 charge 6.226942
+run 300000
+set type 2 charge -8.500738
+set type 4 charge 6.227993
+run 300000
+set type 2 charge -8.500008
+set type 4 charge 6.229064
+run 300000
+set type 2 charge -8.499262
+set type 4 charge 6.230157
+run 300000
+set type 2 charge -8.498502
+set type 4 charge 6.231272
+run 300000
+set type 2 charge -8.497726
+set type 4 charge 6.232409
+run 300000
+set type 2 charge -8.496935
+set type 4 charge 6.233569
+run 300000
+set type 2 charge -8.496128
+set type 4 charge 6.234752
+run 300000
+set type 2 charge -8.495305
+set type 4 charge 6.235959
+run 300000
+set type 2 charge -8.494465
+set type 4 charge 6.237190
+run 300000
+set type 2 charge -8.493609
+set type 4 charge 6.238446
+run 300000
+set type 2 charge -8.492735
+set type 4 charge 6.239727
+run 300000
+set type 2 charge -8.491843
+set type 4 charge 6.241034
+run 300000
+set type 2 charge -8.490934
+set type 4 charge 6.242367
+run 300000
+set type 2 charge -8.490007
+set type 4 charge 6.243726
+run 300000
+set type 2 charge -8.489061
+set type 4 charge 6.245113
+run 300000
+set type 2 charge -8.488096
+set type 4 charge 6.246528
+run 300000
+set type 2 charge -8.487112
+set type 4 charge 6.247971
+run 300000
+set type 2 charge -8.486108
+set type 4 charge 6.249443
+run 300000
+set type 2 charge -8.485084
+set type 4 charge 6.250945
+run 300000
+set type 2 charge -8.484039
+set type 4 charge 6.252476
+run 300000
+set type 2 charge -8.482973
+set type 4 charge 6.254039
+run 300000
+set type 2 charge -8.481886
+set type 4 charge 6.255632
+run 300000
+set type 2 charge -8.480778
+set type 4 charge 6.257258
+run 300000
+set type 2 charge -8.479647
+set type 4 charge 6.258916
+run 300000
+set type 2 charge -8.478494
+set type 4 charge 6.260607
+run 300000
+set type 2 charge -8.477317
+set type 4 charge 6.262332
+run 300000
+set type 2 charge -8.476117
+set type 4 charge 6.264091
+run 300000
+set type 2 charge -8.474893
+set type 4 charge 6.265886
+run 300000
+set type 2 charge -8.473644
+set type 4 charge 6.267716
+run 300000
+set type 2 charge -8.472371
+set type 4 charge 6.269583
+run 300000
+set type 2 charge -8.471072
+set type 4 charge 6.271488
+run 300000
+set type 2 charge -8.469747
+set type 4 charge 6.273430
+run 300000
+set type 2 charge -8.468396
+set type 4 charge 6.275412
+run 300000
+set type 2 charge -8.467017
+set type 4 charge 6.277433
+run 300000
+set type 2 charge -8.465611
+set type 4 charge 6.279494
+run 300000
+set type 2 charge -8.464177
+set type 4 charge 6.281596
+run 300000
+set type 2 charge -8.462715
+set type 4 charge 6.283741
+run 300000
+set type 2 charge -8.461223
+set type 4 charge 6.285928
+run 300000
+set type 2 charge -8.459701
+set type 4 charge 6.288158
+run 300000
+set type 2 charge -8.458150
+set type 4 charge 6.290434
+run 300000
+set type 2 charge -8.456567
+set type 4 charge 6.292754
+run 300000
+set type 2 charge -8.454952
+set type 4 charge 6.295121
+run 300000
+set type 2 charge -8.453306
+set type 4 charge 6.297535
+run 300000
+set type 2 charge -8.451626
+set type 4 charge 6.299997
+run 300000
+set type 2 charge -8.449914
+set type 4 charge 6.302509
+run 300000
+set type 2 charge -8.448167
+set type 4 charge 6.305070
+run 300000
+set type 2 charge -8.446385
+set type 4 charge 6.307682
+run 300000
+set type 2 charge -8.444568
+set type 4 charge 6.310346
+run 300000
+set type 2 charge -8.442715
+set type 4 charge 6.313063
+run 300000
+set type 2 charge -8.440825
+set type 4 charge 6.315834
+run 300000
+set type 2 charge -8.438897
+set type 4 charge 6.318661
+run 300000
+set type 2 charge -8.436931
+set type 4 charge 6.321543
+run 300000
+set type 2 charge -8.434926
+set type 4 charge 6.324483
+run 300000
+set type 2 charge -8.432881
+set type 4 charge 6.327481
+run 300000
+set type 2 charge -8.430795
+set type 4 charge 6.330539
+run 300000
+set type 2 charge -8.428668
+set type 4 charge 6.333657
+run 300000
+set type 2 charge -8.426499
+set type 4 charge 6.336837
+run 300000
+set type 2 charge -8.424287
+set type 4 charge 6.340080
+run 300000
+set type 2 charge -8.422031
+set type 4 charge 6.343388
+run 300000
+set type 2 charge -8.419731
+set type 4 charge 6.346761
+run 300000
+set type 2 charge -8.417384
+set type 4 charge 6.350201
+run 300000
+set type 2 charge -8.414992
+set type 4 charge 6.353709
+run 300000
+set type 2 charge -8.412552
+set type 4 charge 6.357287
+run 300000
+set type 2 charge -8.410063
+set type 4 charge 6.360935
+run 300000
+set type 2 charge -8.407526
+set type 4 charge 6.364655
+run 300000
+set type 2 charge -8.404938
+set type 4 charge 6.368449
+run 300000
+set type 2 charge -8.402299
+set type 4 charge 6.372318
+run 300000
+set type 2 charge -8.399608
+set type 4 charge 6.376264
+run 300000
+set type 2 charge -8.396864
+set type 4 charge 6.380287
+run 300000
+set type 2 charge -8.394065
+set type 4 charge 6.384390
+run 300000
+set type 2 charge -8.391212
+set type 4 charge 6.388573
+run 300000
+set type 2 charge -8.388302
+set type 4 charge 6.392840
+run 300000
+set type 2 charge -8.385335
+set type 4 charge 6.397190
+run 300000
+set type 2 charge -8.382309
+set type 4 charge 6.401626
+run 300000
+set type 2 charge -8.379224
+set type 4 charge 6.406149
+run 300000
+set type 2 charge -8.376078
+set type 4 charge 6.410761
+run 300000
+set type 2 charge -8.372871
+set type 4 charge 6.415464
+run 300000
+set type 2 charge -8.369600
+set type 4 charge 6.420259
+run 300000
+set type 2 charge -8.366265
+set type 4 charge 6.425149
+run 300000
+set type 2 charge -8.362865
+set type 4 charge 6.430134
+run 300000
+set type 2 charge -8.359397
+set type 4 charge 6.435218
+run 300000
+set type 2 charge -8.355862
+set type 4 charge 6.440401
+run 300000
+set type 2 charge -8.352258
+set type 4 charge 6.445685
+run 300000
+set type 2 charge -8.348583
+set type 4 charge 6.451074
+run 300000
+set type 2 charge -8.344836
+set type 4 charge 6.456567
+run 300000
+set type 2 charge -8.341015
+set type 4 charge 6.462168
+run 300000
+set type 2 charge -8.337120
+set type 4 charge 6.467879
+run 300000
+set type 2 charge -8.333149
+set type 4 charge 6.473701
+run 300000
+set type 2 charge -8.329101
+set type 4 charge 6.479637
+run 300000
+set type 2 charge -8.324973
+set type 4 charge 6.485688
+run 300000
+set type 2 charge -8.320765
+set type 4 charge 6.491858
+run 300000
+set type 2 charge -8.316475
+set type 4 charge 6.498148
+run 300000
+set type 2 charge -8.312101
+set type 4 charge 6.504560
+run 300000
+set type 2 charge -8.307643
+set type 4 charge 6.511097
+run 300000
+set type 2 charge -8.303097
+set type 4 charge 6.517761
+run 300000
+set type 2 charge -8.298464
+set type 4 charge 6.524555
+run 300000
+set type 2 charge -8.293740
+set type 4 charge 6.531480
+run 300000
+set type 2 charge -8.288925
+set type 4 charge 6.538540
+run 300000
+set type 2 charge -8.284017
+set type 4 charge 6.545736
+run 300000
+set type 2 charge -8.279013
+set type 4 charge 6.553072
+run 300000
+set type 2 charge -8.273913
+set type 4 charge 6.560549
+run 300000
+set type 2 charge -8.268714
+set type 4 charge 6.568171
+run 300000
+set type 2 charge -8.263415
+set type 4 charge 6.575941
+run 300000
+set type 2 charge -8.258014
+set type 4 charge 6.583860
+run 300000
+set type 2 charge -8.252508
+set type 4 charge 6.591932
+run 300000
+set type 2 charge -8.246897
+set type 4 charge 6.600159
+run 300000
+set type 2 charge -8.241177
+set type 4 charge 6.608544
+run 300000
+set type 2 charge -8.235348
+set type 4 charge 6.617091
+run 300000
+set type 2 charge -8.229407
+set type 4 charge 6.625802
+run 300000
+set type 2 charge -8.223351
+set type 4 charge 6.634680
+run 300000
+set type 2 charge -8.217180
+set type 4 charge 6.643727
+run 300000
+set type 2 charge -8.210891
+set type 4 charge 6.652948
+run 300000
+set type 2 charge -8.204481
+set type 4 charge 6.662346
+run 300000
+set type 2 charge -8.197949
+set type 4 charge 6.671922
+run 300000
+set type 2 charge -8.191293
+set type 4 charge 6.681682
+run 300000
+set type 2 charge -8.184509
+set type 4 charge 6.691627
+run 300000
+set type 2 charge -8.177597
+set type 4 charge 6.701762
+run 300000
+set type 2 charge -8.170553
+set type 4 charge 6.712089
+run 300000
+set type 2 charge -8.163376
+set type 4 charge 6.722612
+run 300000
+set type 2 charge -8.156062
+set type 4 charge 6.733335
+run 300000
+set type 2 charge -8.148610
+set type 4 charge 6.744261
+run 300000
+set type 2 charge -8.141017
+set type 4 charge 6.755393
+run 300000
+set type 2 charge -8.133281
+set type 4 charge 6.766735
+run 300000
+set type 2 charge -8.125398
+set type 4 charge 6.778292
+run 300000
+set type 2 charge -8.117368
+set type 4 charge 6.790066
+run 300000
+set type 2 charge -8.109186
+set type 4 charge 6.802062
+run 300000
+set type 2 charge -8.100851
+set type 4 charge 6.814282
+run 300000
+set type 2 charge -8.092359
+set type 4 charge 6.826732
+run 300000
+set type 2 charge -8.083708
+set type 4 charge 6.839415
+run 300000
+set type 2 charge -8.074896
+set type 4 charge 6.852335
+run 300000
+set type 2 charge -8.065919
+set type 4 charge 6.865497
+run 300000
+set type 2 charge -8.056775
+set type 4 charge 6.878903
+run 300000
+set type 2 charge -8.047461
+set type 4 charge 6.892559
+run 300000
+set type 2 charge -8.037974
+set type 4 charge 6.906469
+run 300000
+set type 2 charge -8.028310
+set type 4 charge 6.920636
+run 300000
+set type 2 charge -8.018468
+set type 4 charge 6.935066
+run 300000
+set type 2 charge -8.008445
+set type 4 charge 6.949762
+run 300000
+set type 2 charge -7.998236
+set type 4 charge 6.964730
+run 300000
+set type 2 charge -7.987839
+set type 4 charge 6.979972
+run 300000
+set type 2 charge -7.977251
+set type 4 charge 6.995495
+run 300000
+set type 2 charge -7.966470
+set type 4 charge 7.011303
+run 300000
+set type 2 charge -7.955490
+set type 4 charge 7.027400
+run 300000
+set type 2 charge -7.944310
+set type 4 charge 7.043791
+run 300000
+set type 2 charge -7.932927
+set type 4 charge 7.060481
+run 300000
+set type 2 charge -7.921336
+set type 4 charge 7.077475
+run 300000
+set type 2 charge -7.909535
+set type 4 charge 7.094777
+run 300000
+set type 2 charge -7.897520
+set type 4 charge 7.112392
+run 300000
+set type 2 charge -7.885288
+set type 4 charge 7.130326
+run 300000
+set type 2 charge -7.872835
+set type 4 charge 7.148584
+run 300000
+set type 2 charge -7.860159
+set type 4 charge 7.167170
+run 300000
+set type 2 charge -7.847254
+set type 4 charge 7.186089
+run 300000
+set type 2 charge -7.834119
+set type 4 charge 7.205347
+run 300000
+set type 2 charge -7.820749
+set type 4 charge 7.224950
+run 300000
+set type 2 charge -7.807140
+set type 4 charge 7.244901
+run 300000
+set type 2 charge -7.793290
+set type 4 charge 7.265208
+run 300000
+set type 2 charge -7.779194
+set type 4 charge 7.285874
+run 300000
+set type 2 charge -7.764849
+set type 4 charge 7.306906
+run 300000
+set type 2 charge -7.750251
+set type 4 charge 7.328308
+run 300000
+set type 2 charge -7.735397
+set type 4 charge 7.350087
+run 300000
+set type 2 charge -7.720282
+set type 4 charge 7.372248
+run 300000
+set type 2 charge -7.704902
+set type 4 charge 7.394797
+run 300000
+set type 2 charge -7.689254
+set type 4 charge 7.417738
+run 300000
+set type 2 charge -7.673335
+set type 4 charge 7.441079
+run 300000
+set type 2 charge -7.657139
+set type 4 charge 7.464824
+run 300000
+set type 2 charge -7.640664
+set type 4 charge 7.488979
+run 300000
+set type 2 charge -7.623905
+set type 4 charge 7.513550
+run 300000
+set type 2 charge -7.606858
+set type 4 charge 7.538543
+run 300000
+set type 2 charge -7.589519
+set type 4 charge 7.563963
+run 300000
+set type 2 charge -7.571885
+set type 4 charge 7.589818
+run 300000
+set type 2 charge -7.553951
+set type 4 charge 7.616111
+run 300000
+set type 2 charge -7.535714
+set type 4 charge 7.642850
+run 300000
+set type 2 charge -7.517168
+set type 4 charge 7.670040
+run 300000
+set type 2 charge -7.498311
+set type 4 charge 7.697687
+run 300000
+set type 2 charge -7.479138
+set type 4 charge 7.725797
+run 300000
+set type 2 charge -7.459645
+set type 4 charge 7.754376
+run 300000
+set type 2 charge -7.439828
+set type 4 charge 7.783431
+run 300000
+set type 2 charge -7.419683
+set type 4 charge 7.812966
+run 300000
+set type 2 charge -7.399206
+set type 4 charge 7.842988
+run 300000
+set type 2 charge -7.378393
+set type 4 charge 7.873504
+run 300000
+set type 2 charge -7.357239
+set type 4 charge 7.904518
+run 300000
+set type 2 charge -7.335741
+set type 4 charge 7.936037
+run 300000
+set type 2 charge -7.313894
+set type 4 charge 7.968068
+run 300000
+set type 2 charge -7.291695
+set type 4 charge 8.000615
+run 300000
+set type 2 charge -7.269139
+set type 4 charge 8.033685
+run 300000
+set type 2 charge -7.246222
+set type 4 charge 8.067284
+run 300000
+set type 2 charge -7.222941
+set type 4 charge 8.101417
+run 300000
+set type 2 charge -7.199291
+set type 4 charge 8.136091
+run 300000
+set type 2 charge -7.175268
+set type 4 charge 8.171312
+run 300000
+set type 2 charge -7.150868
+set type 4 charge 8.207085
+run 300000
+set type 2 charge -7.126088
+set type 4 charge 8.243416
+run 300000
+set type 2 charge -7.100924
+set type 4 charge 8.280310
+run 300000
+set type 2 charge -7.075371
+set type 4 charge 8.317774
+run 300000
+set type 2 charge -7.049426
+set type 4 charge 8.355813
+run 300000
+set type 2 charge -7.023085
+set type 4 charge 8.394433
+run 300000
+set type 2 charge -6.996344
+set type 4 charge 8.433638
+run 300000
+set type 2 charge -6.969200
+set type 4 charge 8.473435
+run 300000
+set type 2 charge -6.941649
+set type 4 charge 8.513829
+run 300000
+set type 2 charge -6.913687
+set type 4 charge 8.554825
+run 300000
+set type 2 charge -6.885311
+set type 4 charge 8.596428
+run 300000
+set type 2 charge -6.856517
+set type 4 charge 8.638644
+run 300000
+set type 2 charge -6.827302
+set type 4 charge 8.681477
+run 300000
+set type 2 charge -6.797663
+set type 4 charge 8.724932
+run 300000
+set type 2 charge -6.767596
+set type 4 charge 8.769014
+run 300000
+set type 2 charge -6.737098
+set type 4 charge 8.813728
+run 300000
+set type 2 charge -6.706167
+set type 4 charge 8.859078
+run 300000
+set type 2 charge -6.674798
+set type 4 charge 8.905068
+run 300000
+set type 2 charge -6.642990
+set type 4 charge 8.951704
+run 300000
+set type 2 charge -6.610739
+set type 4 charge 8.998988
+run 300000
+set type 2 charge -6.578042
+set type 4 charge 9.046926
+run 300000
+set type 2 charge -6.544897
+set type 4 charge 9.095521
+run 300000
+set type 2 charge -6.511302
+set type 4 charge 9.144775
+run 300000
+set type 2 charge -6.477254
+set type 4 charge 9.194694
+run 300000
+set type 2 charge -6.442751
+set type 4 charge 9.245281
+run 300000
+set type 2 charge -6.407791
+set type 4 charge 9.296538
+run 300000
+set type 2 charge -6.372371
+set type 4 charge 9.348468
+run 300000
+set type 2 charge -6.336489
+set type 4 charge 9.401075
+run 300000
+set type 2 charge -6.300145
+set type 4 charge 9.454360
+run 300000
+set type 2 charge -6.263337
+set type 4 charge 9.508327
+run 300000
+set type 2 charge -6.226062
+set type 4 charge 9.562977
+run 300000
+set type 2 charge -6.188319
+set type 4 charge 9.618312
+run 300000
+set type 2 charge -6.150109
+set type 4 charge 9.674334
+run 300000
+set type 2 charge -6.111428
+set type 4 charge 9.731045
+run 300000
+set type 2 charge -6.072278
+set type 4 charge 9.788445
+run 300000
+set type 2 charge -6.032656
+set type 4 charge 9.846536
+run 300000
+set type 2 charge -5.992563
+set type 4 charge 9.905318
+run 300000
+set type 2 charge -5.951997
+set type 4 charge 9.964792
+run 300000
+set type 2 charge -5.910960
+set type 4 charge 10.024958
+run 300000
+set type 2 charge -5.869452
+set type 4 charge 10.085816
+run 300000
+set type 2 charge -5.827471
+set type 4 charge 10.147365
+run 300000
+set type 2 charge -5.785019
+set type 4 charge 10.209605
+run 300000
+set type 2 charge -5.742097
+set type 4 charge 10.272534
+run 300000
+set type 2 charge -5.698705
+set type 4 charge 10.336152
+run 300000
+set type 2 charge -5.654845
+set type 4 charge 10.400458
+run 300000
+set type 2 charge -5.610517
+set type 4 charge 10.465448
+run 300000
+set type 2 charge -5.565724
+set type 4 charge 10.531121
+run 300000
+set type 2 charge -5.520466
+set type 4 charge 10.597475
+run 300000
+set type 2 charge -5.474747
+set type 4 charge 10.664506
+run 300000
+set type 2 charge -5.428567
+set type 4 charge 10.732212
+run 300000
+set type 2 charge -5.381930
+set type 4 charge 10.800588
+run 300000
+set type 2 charge -5.334838
+set type 4 charge 10.869632
+run 300000
+set type 2 charge -5.287294
+set type 4 charge 10.939338
+run 300000
+set type 2 charge -5.239301
+set type 4 charge 11.009702
+run 300000
+set type 2 charge -5.190862
+set type 4 charge 11.080720
+run 300000
+set type 2 charge -5.141981
+set type 4 charge 11.152386
+run 300000
+set type 2 charge -5.092662
+set type 4 charge 11.224694
+run 300000
+set type 2 charge -5.042909
+set type 4 charge 11.297639
+run 300000
+set type 2 charge -4.992726
+set type 4 charge 11.371214
+run 300000
+set type 2 charge -4.942118
+set type 4 charge 11.445412
+run 300000
+set type 2 charge -4.891090
+set type 4 charge 11.520227
+run 300000
+set type 2 charge -4.839646
+set type 4 charge 11.595650
+run 300000
+set type 2 charge -4.787792
+set type 4 charge 11.671675
+run 300000
+set type 2 charge -4.735534
+set type 4 charge 11.748293
+run 300000
+set type 2 charge -4.682877
+set type 4 charge 11.825495
+run 300000
+set type 2 charge -4.629827
+set type 4 charge 11.903272
+run 300000
+set type 2 charge -4.576392
+set type 4 charge 11.981616
+run 300000
+set type 2 charge -4.522577
+set type 4 charge 12.060517
+run 300000
+set type 2 charge -4.468388
+set type 4 charge 12.139964
+run 300000
+set type 2 charge -4.413835
+set type 4 charge 12.219947
+run 300000
+set type 2 charge -4.358922
+set type 4 charge 12.300456
+run 300000
+set type 2 charge -4.303659
+set type 4 charge 12.381480
+run 300000
+set type 2 charge -4.248053
+set type 4 charge 12.463006
+run 300000
+set type 2 charge -4.192111
+set type 4 charge 12.545024
+run 300000
+set type 2 charge -4.135843
+set type 4 charge 12.627521
+run 300000
+set type 2 charge -4.079256
+set type 4 charge 12.710485
+run 300000
+set type 2 charge -4.022359
+set type 4 charge 12.793903
+run 300000
+set type 2 charge -3.965162
+set type 4 charge 12.877762
+run 300000
+set type 2 charge -3.907673
+set type 4 charge 12.962048
+run 300000
+set type 2 charge -3.849902
+set type 4 charge 13.046749
+run 300000
+set type 2 charge -3.791858
+set type 4 charge 13.131849
+run 300000
+set type 2 charge -3.733551
+set type 4 charge 13.217335
+run 300000
+set type 2 charge -3.674992
+set type 4 charge 13.303191
+run 300000
+set type 2 charge -3.616189
+set type 4 charge 13.389404
+run 300000
+set type 2 charge -3.557153
+set type 4 charge 13.475958
+run 300000
+set type 2 charge -3.497896
+set type 4 charge 13.562837
+run 300000
+set type 2 charge -3.438427
+set type 4 charge 13.650027
+run 300000
+set type 2 charge -3.378758
+set type 4 charge 13.737510
+run 300000
+set type 2 charge -3.318898
+set type 4 charge 13.825272
+run 300000
+set type 2 charge -3.258861
+set type 4 charge 13.913295
+run 300000
+set type 2 charge -3.198656
+set type 4 charge 14.001564
+run 300000
+set type 2 charge -3.138295
+set type 4 charge 14.090061
+run 300000
+set type 2 charge -3.077790
+set type 4 charge 14.178769
+run 300000
+set type 2 charge -3.017153
+set type 4 charge 14.267672
+run 300000
+set type 2 charge -2.956394
+set type 4 charge 14.356753
+run 300000
+set type 2 charge -2.895526
+set type 4 charge 14.445993
+run 300000
+set type 2 charge -2.834561
+set type 4 charge 14.535377
+run 300000
+set type 2 charge -2.773510
+set type 4 charge 14.624885
+run 300000
+set type 2 charge -2.712387
+set type 4 charge 14.714500
+run 300000
+set type 2 charge -2.651202
+set type 4 charge 14.804205
+run 300000
+set type 2 charge -2.589968
+set type 4 charge 14.893982
+run 300000
+set type 2 charge -2.528698
+set type 4 charge 14.983813
+run 300000
+set type 2 charge -2.467403
+set type 4 charge 15.073680
+run 300000
+set type 2 charge -2.406096
+set type 4 charge 15.163564
+run 300000
+set type 2 charge -2.344789
+set type 4 charge 15.253449
+run 300000
+set type 2 charge -2.283494
+set type 4 charge 15.343316
+run 300000
+set type 2 charge -2.222223
+set type 4 charge 15.433146
+run 300000
+set type 2 charge -2.160990
+set type 4 charge 15.522923
+run 300000
+set type 2 charge -2.099805
+set type 4 charge 15.612628
+run 300000
+set type 2 charge -2.038681
+set type 4 charge 15.702244
+run 300000
+set type 2 charge -1.977631
+set type 4 charge 15.791752
+run 300000
+set type 2 charge -1.916666
+set type 4 charge 15.881135
+run 300000
+set type 2 charge -1.855798
+set type 4 charge 15.970376
+run 300000
+set type 2 charge -1.795039
+set type 4 charge 16.059456
+run 300000
+set type 2 charge -1.734401
+set type 4 charge 16.148360
+run 300000
+set type 2 charge -1.673896
+set type 4 charge 16.237068
+run 300000
+set type 2 charge -1.613535
+set type 4 charge 16.325565
+run 300000
+set type 2 charge -1.553331
+set type 4 charge 16.413834
+run 300000
+set type 2 charge -1.493293
+set type 4 charge 16.501857
+run 300000
+set type 2 charge -1.433434
+set type 4 charge 16.589618
+run 300000
+set type 2 charge -1.373764
+set type 4 charge 16.677102
+run 300000
+set type 2 charge -1.314296
+set type 4 charge 16.764291
+run 300000
+set type 2 charge -1.255038
+set type 4 charge 16.851171
+run 300000
+set type 2 charge -1.196003
+set type 4 charge 16.937725
+run 300000
+set type 2 charge -1.137200
+set type 4 charge 17.023937
+run 300000
+set type 2 charge -1.078640
+set type 4 charge 17.109794
+run 300000
+set type 2 charge -1.020333
+set type 4 charge 17.195280
+run 300000
+set type 2 charge -0.962289
+set type 4 charge 17.280380
+run 300000
+set type 2 charge -0.904518
+set type 4 charge 17.365080
+run 300000
+set type 2 charge -0.847029
+set type 4 charge 17.449367
+run 300000
+set type 2 charge -0.789832
+set type 4 charge 17.533226
+run 300000
+set type 2 charge -0.732936
+set type 4 charge 17.616644
+run 300000
+set type 2 charge -0.676349
+set type 4 charge 17.699608
+run 300000
+set type 2 charge -0.620080
+set type 4 charge 17.782105
+run 300000
+set type 2 charge -0.564139
+set type 4 charge 17.864123
+run 300000
+set type 2 charge -0.508533
+set type 4 charge 17.945649
+run 300000
+set type 2 charge -0.453269
+set type 4 charge 18.026672
+run 300000
+set type 2 charge -0.398357
+set type 4 charge 18.107181
+run 300000
+set type 2 charge -0.343803
+set type 4 charge 18.187165
+run 300000
+set type 2 charge -0.289615
+set type 4 charge 18.266612
+run 300000
+set type 2 charge -0.235800
+set type 4 charge 18.345512
+run 300000
+set type 2 charge -0.182364
+set type 4 charge 18.423856
+run 300000
+set type 2 charge -0.129315
+set type 4 charge 18.501634
+run 300000
+set type 2 charge -0.076658
+set type 4 charge 18.578836
+run 300000
+set type 2 charge -0.024400
+set type 4 charge 18.655454
+run 300000
+set type 2 charge 0.027454
+set type 4 charge 18.731478
+run 300000
+set type 2 charge 0.078898
+set type 4 charge 18.806902
+run 300000
+set type 2 charge 0.129927
+set type 4 charge 18.881717
+run 300000
+set type 2 charge 0.180535
+set type 4 charge 18.955915
+run 300000
+set type 2 charge 0.230718
+set type 4 charge 19.029490
+run 300000
+set type 2 charge 0.280471
+set type 4 charge 19.102435
+run 300000
+set type 2 charge 0.329790
+set type 4 charge 19.174743
+run 300000
+set type 2 charge 0.378670
+set type 4 charge 19.246409
+run 300000
+set type 2 charge 0.427109
+set type 4 charge 19.317426
+run 300000
+set type 2 charge 0.475102
+set type 4 charge 19.387791
+run 300000
+set type 2 charge 0.522646
+set type 4 charge 19.457497
+run 300000
+set type 2 charge 0.569738
+set type 4 charge 19.526540
+run 300000
+set type 2 charge 0.616376
+set type 4 charge 19.594917
+run 300000
+set type 2 charge 0.662555
+set type 4 charge 19.662622
+run 300000
+set type 2 charge 0.708275
+set type 4 charge 19.729654
+run 300000
+set type 2 charge 0.753532
+set type 4 charge 19.796007
+run 300000
+set type 2 charge 0.798326
+set type 4 charge 19.861681
+run 300000
+set type 2 charge 0.842654
+set type 4 charge 19.926671
+run 300000
+set type 2 charge 0.886514
+set type 4 charge 19.990976
+run 300000
+set type 2 charge 0.929906
+set type 4 charge 20.054594
+run 300000
+set type 2 charge 0.972828
+set type 4 charge 20.117524
+run 300000
+set type 2 charge 1.015280
+set type 4 charge 20.179764
+run 300000
+set type 2 charge 1.057260
+set type 4 charge 20.241313
+run 300000
+set type 2 charge 1.098769
+set type 4 charge 20.302171
+run 300000
+set type 2 charge 1.139806
+set type 4 charge 20.362337
+run 300000
+set type 2 charge 1.180371
+set type 4 charge 20.421810
+run 300000
+set type 2 charge 1.220464
+set type 4 charge 20.480593
+run 300000
+set type 2 charge 1.260086
+set type 4 charge 20.538683
+run 300000
+set type 2 charge 1.299237
+set type 4 charge 20.596084
+run 300000
+set type 2 charge 1.337917
+set type 4 charge 20.652794
+run 300000
+set type 2 charge 1.376128
+set type 4 charge 20.708816
+run 300000
+set type 2 charge 1.413870
+set type 4 charge 20.764152
+run 300000
+set type 2 charge 1.451145
+set type 4 charge 20.818802
+run 300000
+set type 2 charge 1.487954
+set type 4 charge 20.872768
+run 300000
+set type 2 charge 1.524298
+set type 4 charge 20.926054
+run 300000
+set type 2 charge 1.560179
+set type 4 charge 20.978661
+run 300000
+set type 2 charge 1.595599
+set type 4 charge 21.030591
+run 300000
+set type 2 charge 1.630560
+set type 4 charge 21.081848
+run 300000
+set type 2 charge 1.665063
+set type 4 charge 21.132434
+run 300000
+set type 2 charge 1.699111
+set type 4 charge 21.182353
+run 300000
+set type 2 charge 1.732706
+set type 4 charge 21.231608
+run 300000
+set type 2 charge 1.765850
+set type 4 charge 21.280203
+run 300000
+set type 2 charge 1.798547
+set type 4 charge 21.328140
+run 300000
+set type 2 charge 1.830798
+set type 4 charge 21.375425
+run 300000
+set type 2 charge 1.862607
+set type 4 charge 21.422060
+run 300000
+set type 2 charge 1.893975
+set type 4 charge 21.468051
+run 300000
+set type 2 charge 1.924907
+set type 4 charge 21.513401
+run 300000
+set type 2 charge 1.955405
+set type 4 charge 21.558115
+run 300000
+set type 2 charge 1.985472
+set type 4 charge 21.602197
+run 300000
+set type 2 charge 2.015111
+set type 4 charge 21.645652
+run 300000
+set type 2 charge 2.044326
+set type 4 charge 21.688485
+run 300000
+set type 2 charge 2.073119
+set type 4 charge 21.730700
+run 300000
+set type 2 charge 2.101495
+set type 4 charge 21.772304
+run 300000
+set type 2 charge 2.129457
+set type 4 charge 21.813300
+run 300000
+set type 2 charge 2.157009
+set type 4 charge 21.853693
+run 300000
+set type 2 charge 2.184153
+set type 4 charge 21.893491
+run 300000
+set type 2 charge 2.210894
+set type 4 charge 21.932696
+run 300000
+set type 2 charge 2.237235
+set type 4 charge 21.971316
+run 300000
+set type 2 charge 2.263180
+set type 4 charge 22.009354
+run 300000
+set type 2 charge 2.288732
+set type 4 charge 22.046818
+run 300000
+set type 2 charge 2.313897
+set type 4 charge 22.083713
+run 300000
+set type 2 charge 2.338677
+set type 4 charge 22.120044
+run 300000
+set type 2 charge 2.363076
+set type 4 charge 22.155817
+run 300000
+set type 2 charge 2.387099
+set type 4 charge 22.191037
+run 300000
+set type 2 charge 2.410749
+set type 4 charge 22.225711
+run 300000
+set type 2 charge 2.434030
+set type 4 charge 22.259845
+run 300000
+set type 2 charge 2.456947
+set type 4 charge 22.293444
+run 300000
+set type 2 charge 2.479503
+set type 4 charge 22.326514
+run 300000
+set type 2 charge 2.501702
+set type 4 charge 22.359061
+run 300000
+set type 2 charge 2.523549
+set type 4 charge 22.391091
+run 300000
+set type 2 charge 2.545047
+set type 4 charge 22.422611
+run 300000
+set type 2 charge 2.566201
+set type 4 charge 22.453625
+run 300000
+set type 2 charge 2.587015
+set type 4 charge 22.484140
+run 300000
+set type 2 charge 2.607492
+set type 4 charge 22.514163
+run 300000
+set type 2 charge 2.627637
+set type 4 charge 22.543698
+run 300000
+set type 2 charge 2.647454
+set type 4 charge 22.572752
+run 300000
+set type 2 charge 2.666947
+set type 4 charge 22.601332
+run 300000
+set type 2 charge 2.686120
+set type 4 charge 22.629442
+run 300000
+set type 2 charge 2.704977
+set type 4 charge 22.657089
+run 300000
+set type 2 charge 2.723522
+set type 4 charge 22.684279
+run 300000
+set type 2 charge 2.741760
+set type 4 charge 22.711018
+run 300000
+set type 2 charge 2.759693
+set type 4 charge 22.737311
+run 300000
+set type 2 charge 2.777328
+set type 4 charge 22.763165
+run 300000
+set type 2 charge 2.794666
+set type 4 charge 22.788586
+run 300000
+set type 2 charge 2.811713
+set type 4 charge 22.813579
+run 300000
+set type 2 charge 2.828472
+set type 4 charge 22.838150
+run 300000
+set type 2 charge 2.844948
+set type 4 charge 22.862305
+run 300000
+set type 2 charge 2.861143
+set type 4 charge 22.886050
+run 300000
+set type 2 charge 2.877063
+set type 4 charge 22.909390
+run 300000
+set type 2 charge 2.892710
+set type 4 charge 22.932332
+run 300000
+set type 2 charge 2.908090
+set type 4 charge 22.954881
+run 300000
+set type 2 charge 2.923205
+set type 4 charge 22.977041
+run 300000
+set type 2 charge 2.938060
+set type 4 charge 22.998820
+run 300000
+set type 2 charge 2.952658
+set type 4 charge 23.020223
+run 300000
+set type 2 charge 2.967003
+set type 4 charge 23.041255
+run 300000
+set type 2 charge 2.981099
+set type 4 charge 23.061921
+run 300000
+set type 2 charge 2.994949
+set type 4 charge 23.082227
+run 300000
+set type 2 charge 3.008557
+set type 4 charge 23.102179
+run 300000
+set type 2 charge 3.021927
+set type 4 charge 23.121781
+run 300000
+set type 2 charge 3.035063
+set type 4 charge 23.141040
+run 300000
+set type 2 charge 3.047967
+set type 4 charge 23.159959
+run 300000
+set type 2 charge 3.060644
+set type 4 charge 23.178545
+run 300000
+set type 2 charge 3.073096
+set type 4 charge 23.196802
+run 300000
+set type 2 charge 3.085329
+set type 4 charge 23.214736
+run 300000
+set type 2 charge 3.097343
+set type 4 charge 23.232352
+run 300000
+set type 2 charge 3.109145
+set type 4 charge 23.249654
+run 300000
+set type 2 charge 3.120735
+set type 4 charge 23.266647
+run 300000
+set type 2 charge 3.132119
+set type 4 charge 23.283337
+run 300000
+set type 2 charge 3.143299
+set type 4 charge 23.299728
+run 300000
+set type 2 charge 3.154278
+set type 4 charge 23.315825
+run 300000
+set type 2 charge 3.165060
+set type 4 charge 23.331633
+run 300000
+set type 2 charge 3.175648
+set type 4 charge 23.347156
+run 300000
+set type 2 charge 3.186044
+set type 4 charge 23.362399
+run 300000
+set type 2 charge 3.196253
+set type 4 charge 23.377366
+run 300000
+set type 2 charge 3.206277
+set type 4 charge 23.392063
+run 300000
+set type 2 charge 3.216119
+set type 4 charge 23.406493
+run 300000
+set type 2 charge 3.225782
+set type 4 charge 23.420660
+run 300000
+set type 2 charge 3.235269
+set type 4 charge 23.434570
+run 300000
+set type 2 charge 3.244583
+set type 4 charge 23.448225
+run 300000
+set type 2 charge 3.253728
+set type 4 charge 23.461632
+run 300000
+set type 2 charge 3.262704
+set type 4 charge 23.474793
+run 300000
+set type 2 charge 3.271517
+set type 4 charge 23.487713
+run 300000
+set type 2 charge 3.280167
+set type 4 charge 23.500396
+run 300000
+set type 2 charge 3.288659
+set type 4 charge 23.512846
+run 300000
+set type 2 charge 3.296994
+set type 4 charge 23.525067
+run 300000
+set type 2 charge 3.305176
+set type 4 charge 23.537063
+run 300000
+set type 2 charge 3.313207
+set type 4 charge 23.548837
+run 300000
+set type 2 charge 3.321089
+set type 4 charge 23.560393
+run 300000
+set type 2 charge 3.328825
+set type 4 charge 23.571736
+run 300000
+set type 2 charge 3.336418
+set type 4 charge 23.582868
+run 300000
+set type 2 charge 3.343871
+set type 4 charge 23.593794
+run 300000
+set type 2 charge 3.351184
+set type 4 charge 23.604517
+run 300000
+set type 2 charge 3.358362
+set type 4 charge 23.615040
+run 300000
+set type 2 charge 3.365405
+set type 4 charge 23.625367
+run 300000
+set type 2 charge 3.372318
+set type 4 charge 23.635501
+run 300000
+set type 2 charge 3.379101
+set type 4 charge 23.645447
+run 300000
+set type 2 charge 3.385758
+set type 4 charge 23.655206
+run 300000
+set type 2 charge 3.392290
+set type 4 charge 23.664783
+run 300000
+set type 2 charge 3.398699
+set type 4 charge 23.674180
+run 300000
+set type 2 charge 3.404989
+set type 4 charge 23.683401
+run 300000
+set type 2 charge 3.411160
+set type 4 charge 23.692449
+run 300000
+set type 2 charge 3.417215
+set type 4 charge 23.701327
+run 300000
+set type 2 charge 3.423156
+set type 4 charge 23.710038
+run 300000
+set type 2 charge 3.428986
+set type 4 charge 23.718584
+run 300000
+set type 2 charge 3.434705
+set type 4 charge 23.726970
+run 300000
+set type 2 charge 3.440317
+set type 4 charge 23.735197
+run 300000
+set type 2 charge 3.445822
+set type 4 charge 23.743269
+run 300000
+set type 2 charge 3.451224
+set type 4 charge 23.751188
+run 300000
+set type 2 charge 3.456523
+set type 4 charge 23.758957
+run 300000
+set type 2 charge 3.461722
+set type 4 charge 23.766579
+run 300000
+set type 2 charge 3.466822
+set type 4 charge 23.774057
+run 300000
+set type 2 charge 3.471825
+set type 4 charge 23.781393
+run 300000
+set type 2 charge 3.476734
+set type 4 charge 23.788589
+run 300000
+set type 2 charge 3.481549
+set type 4 charge 23.795649
+run 300000
+set type 2 charge 3.486272
+set type 4 charge 23.802574
+run 300000
+set type 2 charge 3.490906
+set type 4 charge 23.809368
+run 300000
+set type 2 charge 3.495451
+set type 4 charge 23.816032
+run 300000
+set type 2 charge 3.499910
+set type 4 charge 23.822569
+run 300000
+set type 2 charge 3.504283
+set type 4 charge 23.828981
+run 300000
+set type 2 charge 3.508573
+set type 4 charge 23.835271
+run 300000
+set type 2 charge 3.512781
+set type 4 charge 23.841440
+run 300000
+set type 2 charge 3.516909
+set type 4 charge 23.847492
+run 300000
+set type 2 charge 3.520958
+set type 4 charge 23.853428
+run 300000
+set type 2 charge 3.524929
+set type 4 charge 23.859250
+run 300000
+set type 2 charge 3.528824
+set type 4 charge 23.864960
+run 300000
+set type 2 charge 3.532644
+set type 4 charge 23.870561
+run 300000
+set type 2 charge 3.536391
+set type 4 charge 23.876055
+run 300000
+set type 2 charge 3.540066
+set type 4 charge 23.881443
+run 300000
+set type 2 charge 3.543671
+set type 4 charge 23.886728
+run 300000
+set type 2 charge 3.547206
+set type 4 charge 23.891911
+run 300000
+set type 2 charge 3.550673
+set type 4 charge 23.896994
+run 300000
+set type 2 charge 3.554073
+set type 4 charge 23.901980
+run 300000
+set type 2 charge 3.557408
+set type 4 charge 23.906869
+run 300000
+set type 2 charge 3.560679
+set type 4 charge 23.911665
+run 300000
+set type 2 charge 3.563887
+set type 4 charge 23.916368
+run 300000
+set type 2 charge 3.567033
+set type 4 charge 23.920980
+run 300000
+set type 2 charge 3.570118
+set type 4 charge 23.925503
+run 300000
+set type 2 charge 3.573143
+set type 4 charge 23.929939
+run 300000
+set type 2 charge 3.576111
+set type 4 charge 23.934289
+run 300000
+set type 2 charge 3.579020
+set type 4 charge 23.938555
+run 300000
+set type 2 charge 3.581874
+set type 4 charge 23.942739
+run 300000
+set type 2 charge 3.584672
+set type 4 charge 23.946842
+run 300000
+set type 2 charge 3.587416
+set type 4 charge 23.950865
+run 300000
+set type 2 charge 3.590107
+set type 4 charge 23.954810
+run 300000
+set type 2 charge 3.592746
+set type 4 charge 23.958679
+run 300000
+set type 2 charge 3.595334
+set type 4 charge 23.962473
+run 300000
+set type 2 charge 3.597872
+set type 4 charge 23.966194
+run 300000
+set type 2 charge 3.600360
+set type 4 charge 23.969842
+run 300000
+set type 2 charge 3.602800
+set type 4 charge 23.973420
+run 300000
+set type 2 charge 3.605193
+set type 4 charge 23.976928
+run 300000
+set type 2 charge 3.607539
+set type 4 charge 23.980368
+run 300000
+set type 2 charge 3.609840
+set type 4 charge 23.983741
+run 300000
+set type 2 charge 3.612096
+set type 4 charge 23.987048
+run 300000
+set type 2 charge 3.614308
+set type 4 charge 23.990292
+run 300000
+set type 2 charge 3.616477
+set type 4 charge 23.993472
+run 300000
+set type 2 charge 3.618604
+set type 4 charge 23.996590
+run 300000
+set type 2 charge 3.620689
+set type 4 charge 23.999648
+run 300000
+set type 2 charge 3.622734
+set type 4 charge 24.002646
+run 300000
+set type 2 charge 3.624739
+set type 4 charge 24.005586
+run 300000
+set type 2 charge 3.626705
+set type 4 charge 24.008468
+run 300000
+set type 2 charge 3.628633
+set type 4 charge 24.011294
+run 300000
+set type 2 charge 3.630523
+set type 4 charge 24.014065
+run 300000
+set type 2 charge 3.632376
+set type 4 charge 24.016783
+run 300000
+set type 2 charge 3.634194
+set type 4 charge 24.019447
+run 300000
+set type 2 charge 3.635975
+set type 4 charge 24.022059
+run 300000
+set type 2 charge 3.637722
+set type 4 charge 24.024620
+run 300000
+set type 2 charge 3.639435
+set type 4 charge 24.027131
+run 300000
+set type 2 charge 3.641114
+set type 4 charge 24.029593
+run 300000
+set type 2 charge 3.642761
+set type 4 charge 24.032007
+run 300000
+set type 2 charge 3.644375
+set type 4 charge 24.034374
+run 300000
+set type 2 charge 3.645958
+set type 4 charge 24.036695
+run 300000
+set type 2 charge 3.647510
+set type 4 charge 24.038970
+run 300000
+set type 2 charge 3.649031
+set type 4 charge 24.041201
+run 300000
+set type 2 charge 3.650523
+set type 4 charge 24.043388
+run 300000
+set type 2 charge 3.651986
+set type 4 charge 24.045532
+run 300000
+set type 2 charge 3.653420
+set type 4 charge 24.047635
+run 300000
+set type 2 charge 3.654826
+set type 4 charge 24.049696
+run 300000
+set type 2 charge 3.656204
+set type 4 charge 24.051717
+run 300000
+set type 2 charge 3.657555
+set type 4 charge 24.053698
+run 300000
+set type 2 charge 3.658880
+set type 4 charge 24.055641
+run 300000
+set type 2 charge 3.660179
+set type 4 charge 24.057545
+run 300000
+set type 2 charge 3.661453
+set type 4 charge 24.059412
+run 300000
+set type 2 charge 3.662701
+set type 4 charge 24.061243
+run 300000
+set type 2 charge 3.663925
+set type 4 charge 24.063038
+run 300000
+set type 2 charge 3.665125
+set type 4 charge 24.064797
+run 300000
+set type 2 charge 3.666302
+set type 4 charge 24.066522
+run 300000
+set type 2 charge 3.667455
+set type 4 charge 24.068213
+run 300000
+set type 2 charge 3.668586
+set type 4 charge 24.069871
+run 300000
+set type 2 charge 3.669695
+set type 4 charge 24.071497
+run 300000
+set type 2 charge 3.670782
+set type 4 charge 24.073090
+run 300000
+set type 2 charge 3.671847
+set type 4 charge 24.074652
+run 300000
+set type 2 charge 3.672892
+set type 4 charge 24.076184
+run 300000
+set type 2 charge 3.673916
+set type 4 charge 24.077685
+run 300000
+set type 2 charge 3.674920
+set type 4 charge 24.079157
+run 300000
+set type 2 charge 3.675904
+set type 4 charge 24.080600
+run 300000
+set type 2 charge 3.676869
+set type 4 charge 24.082015
+run 300000
+set type 2 charge 3.677815
+set type 4 charge 24.083402
+run 300000
+set type 2 charge 3.678743
+set type 4 charge 24.084762
+run 300000
+set type 2 charge 3.679652
+set type 4 charge 24.086095
+run 300000
+set type 2 charge 3.680543
+set type 4 charge 24.087402
+run 300000
+set type 2 charge 3.681417
+set type 4 charge 24.088683
+run 300000
+set type 2 charge 3.682274
+set type 4 charge 24.089939
+run 300000
+set type 2 charge 3.683113
+set type 4 charge 24.091170
+run 300000
+set type 2 charge 3.683937
+set type 4 charge 24.092377
+run 300000
+set type 2 charge 3.684744
+set type 4 charge 24.093560
+run 300000
+set type 2 charge 3.685535
+set type 4 charge 24.094720
+run 300000
+set type 2 charge 3.686310
+set type 4 charge 24.095857
+run 300000
+set type 2 charge 3.687071
+set type 4 charge 24.096972
+run 300000
+set type 2 charge 3.687816
+set type 4 charge 24.098065
+run 300000
+set type 2 charge 3.688547
+set type 4 charge 24.099136
+run 300000
+set type 2 charge 3.689263
+set type 4 charge 24.100186
+run 300000
+set type 2 charge 3.689965
+set type 4 charge 24.101216
+run 300000
+set type 2 charge 3.690654
+set type 4 charge 24.102225
+run 300000
+set type 2 charge 3.691329
+set type 4 charge 24.103214
+run 300000
+set type 2 charge 3.691990
+set type 4 charge 24.104184
+run 300000
+set type 2 charge 3.692639
+set type 4 charge 24.105135
+run 300000
+set type 2 charge 3.693274
+set type 4 charge 24.106067
+run 300000
+set type 2 charge 3.693898
+set type 4 charge 24.106981
+run 300000
+set type 2 charge 3.694509
+set type 4 charge 24.107877
+run 300000
+set type 2 charge 3.695108
+set type 4 charge 24.108755
+run 300000
+set type 2 charge 3.695695
+set type 4 charge 24.109616
+run 300000
+set type 2 charge 3.696270
+set type 4 charge 24.110459
+run 300000
+set type 2 charge 3.696834
+set type 4 charge 24.111287
+run 300000
+set type 2 charge 3.697387
+set type 4 charge 24.112097
+run 300000
+set type 2 charge 3.697930
+set type 4 charge 24.112892
+run 300000
+set type 2 charge 3.698461
+set type 4 charge 24.113671
+run 300000
+set type 2 charge 3.698982
+set type 4 charge 24.114435
+run 300000
+set type 2 charge 3.699493
+set type 4 charge 24.115184
+run 300000
+set type 2 charge 3.699993
+set type 4 charge 24.115918
+run 300000
+set type 2 charge 3.700484
+set type 4 charge 24.116638
+run 300000
+set type 2 charge 3.700965
+set type 4 charge 24.117343
+run 300000
+set type 2 charge 3.701437
+set type 4 charge 24.118034
+run 300000
+set type 2 charge 3.701899
+set type 4 charge 24.118712
+run 300000
+set type 2 charge 3.702352
+set type 4 charge 24.119377
+run 300000
+set type 2 charge 3.702797
+set type 4 charge 24.120028
+run 300000
+set type 2 charge 3.703232
+set type 4 charge 24.120666
+run 300000
+set type 2 charge 3.703659
+set type 4 charge 24.121292
+run 300000
+set type 2 charge 3.704077
+set type 4 charge 24.121906
+run 300000
+set type 2 charge 3.704488
+set type 4 charge 24.122507
+run 300000
+set type 2 charge 3.704890
+set type 4 charge 24.123097
+run 300000
+set type 2 charge 3.705284
+set type 4 charge 24.123675
+run 300000
+set type 2 charge 3.705670
+set type 4 charge 24.124241
+run 300000
+set type 2 charge 3.706049
+set type 4 charge 24.124796
+run 300000
+set type 2 charge 3.706420
+set type 4 charge 24.125341
+run 300000
+set type 2 charge 3.706784
+set type 4 charge 24.125874
+run 300000
+set type 2 charge 3.707141
+set type 4 charge 24.126398
+run 300000
+set type 2 charge 3.707491
+set type 4 charge 24.126910
+run 300000
+set type 2 charge 3.707834
+set type 4 charge 24.127413
+run 300000
+set type 2 charge 3.708170
+set type 4 charge 24.127906
+run 300000
+set type 2 charge 3.708499
+set type 4 charge 24.128389
+run 300000
+set type 2 charge 3.708822
+set type 4 charge 24.128862
+run 300000
+set type 2 charge 3.709138
+set type 4 charge 24.129326
+run 300000
+set type 2 charge 3.709449
+set type 4 charge 24.129781
+run 300000
+set type 2 charge 3.709753
+set type 4 charge 24.130227
+run 300000
+set type 2 charge 3.710051
+set type 4 charge 24.130664
+run 300000
+set type 2 charge 3.710343
+set type 4 charge 24.131092
+run 300000
+set type 2 charge 3.710630
+set type 4 charge 24.131512
+run 300000
+set type 2 charge 3.710911
+set type 4 charge 24.131924
+run 300000
+set type 2 charge 3.711186
+set type 4 charge 24.132328
+run 300000
+set type 2 charge 3.711456
+set type 4 charge 24.132723
+run 300000
+set type 2 charge 3.711720
+set type 4 charge 24.133111
+run 300000
+set type 2 charge 3.711979
+set type 4 charge 24.133491
+run 300000
+set type 2 charge 3.712234
+set type 4 charge 24.133864
+run 300000
+set type 2 charge 3.712483
+set type 4 charge 24.134229
+run 300000
+set type 2 charge 3.712727
+set type 4 charge 24.134587
+run 300000
+set type 2 charge 3.712966
+set type 4 charge 24.134938
+run 300000
+set type 2 charge 3.713201
+set type 4 charge 24.135282
+run 300000
+set type 2 charge 3.713431
+set type 4 charge 24.135619
+run 300000
+set type 2 charge 3.713656
+set type 4 charge 24.135950
+run 300000
+set type 2 charge 3.713877
+set type 4 charge 24.136274
+run 300000
+set type 2 charge 3.714094
+set type 4 charge 24.136592
+run 300000
+set type 2 charge 3.714306
+set type 4 charge 24.136903
+run 300000
+set type 2 charge 3.714515
+set type 4 charge 24.137208
+run 300000
+set type 2 charge 3.714719
+set type 4 charge 24.137507
+run 300000
+set type 2 charge 3.714919
+set type 4 charge 24.137801
+run 300000
+set type 2 charge 3.715115
+set type 4 charge 24.138088
+run 300000
+set type 2 charge 3.715307
+set type 4 charge 24.138370
+run 300000
+set type 2 charge 3.715495
+set type 4 charge 24.138646
+run 300000
+set type 2 charge 3.715680
+set type 4 charge 24.138917
+run 300000
+set type 2 charge 3.715861
+set type 4 charge 24.139182
+run 300000
+set type 2 charge 3.716038
+set type 4 charge 24.139442
+run 300000
+set type 2 charge 3.716212
+set type 4 charge 24.139697
+run 300000
+set type 2 charge 3.716383
+set type 4 charge 24.139947
+run 300000
+set type 2 charge 3.716550
+set type 4 charge 24.140192
+run 300000
+set type 2 charge 3.716714
+set type 4 charge 24.140432
+run 300000
+set type 2 charge 3.716874
+set type 4 charge 24.140668
+run 300000
+set type 2 charge 3.717032
+set type 4 charge 24.140898
+run 300000
+set type 2 charge 3.717186
+set type 4 charge 24.141125
+run 300000
+set type 2 charge 3.717337
+set type 4 charge 24.141346
+run 300000
+set type 2 charge 3.717485
+set type 4 charge 24.141564
+run 300000
+set type 2 charge 3.717631
+set type 4 charge 24.141777
+run 300000
+set type 2 charge 3.717773
+set type 4 charge 24.141985
+run 300000
+set type 2 charge 3.717913
+set type 4 charge 24.142190
+run 300000
+set type 2 charge 3.718049
+set type 4 charge 24.142391
+run 300000
+set type 2 charge 3.718184
+set type 4 charge 24.142587
+run 300000
+set type 2 charge 3.718315
+set type 4 charge 24.142780
+run 300000
+set type 2 charge 3.718444
+set type 4 charge 24.142969
+run 300000
+set type 2 charge 3.718570
+set type 4 charge 24.143154
+run 300000
+set type 2 charge 3.718694
+set type 4 charge 24.143336
+run 300000
+set type 2 charge 3.718816
+set type 4 charge 24.143514
+run 300000
+set type 2 charge 3.718935
+set type 4 charge 24.143688
+run 300000
+set type 2 charge 3.719051
+set type 4 charge 24.143859
+run 300000
+set type 2 charge 3.719165
+set type 4 charge 24.144027
+run 300000
+set type 2 charge 3.719278
+set type 4 charge 24.144191
+run 300000
+set type 2 charge 3.719387
+set type 4 charge 24.144352
+run 300000
+set type 2 charge 3.719495
+set type 4 charge 24.144510
+run 300000
+set type 2 charge 3.719601
+set type 4 charge 24.144665
+run 300000
+set type 2 charge 3.719704
+set type 4 charge 24.144817
+run 300000
+set type 2 charge 3.719805
+set type 4 charge 24.144965
+run 300000
+set type 2 charge 3.719905
+set type 4 charge 24.145111
+run 300000
+set type 2 charge 3.720002
+set type 4 charge 24.145254
+run 300000
+set type 2 charge 3.720098
+set type 4 charge 24.145394
+run 300000
+set type 2 charge 3.720191
+set type 4 charge 24.145531
+run 300000
+set type 2 charge 3.720283
+set type 4 charge 24.145666
+run 300000
+set type 2 charge 3.720373
+set type 4 charge 24.145798
+run 300000
+set type 2 charge 3.720461
+set type 4 charge 24.145927
+run 300000
+set type 2 charge 3.720548
+set type 4 charge 24.146054
+run 300000
+set type 2 charge 3.720632
+set type 4 charge 24.146178
+run 300000
+set type 2 charge 3.720716
+set type 4 charge 24.146300
+run 300000
+set type 2 charge 3.720797
+set type 4 charge 24.146419
+run 300000
+set type 2 charge 3.720877
+set type 4 charge 24.146536
+run 300000
+set type 2 charge 3.720955
+set type 4 charge 24.146651
+run 300000
+set type 2 charge 3.721032
+set type 4 charge 24.146763
+run 300000
+set type 2 charge 3.721107
+set type 4 charge 24.146873
+run 300000
+set type 2 charge 3.721180
+set type 4 charge 24.146981
+run 300000
+set type 2 charge 3.721253
+set type 4 charge 24.147087
+run 300000
+set type 2 charge 3.721323
+set type 4 charge 24.147191
+run 300000
+set type 2 charge 3.721393
+set type 4 charge 24.147292
+run 300000
+set type 2 charge 3.721461
+set type 4 charge 24.147392
+run 300000
+set type 2 charge 3.721527
+set type 4 charge 24.147490
+run 300000
+set type 2 charge 3.721593
+set type 4 charge 24.147586
+run 300000
+set type 2 charge 3.721657
+set type 4 charge 24.147680
+run 300000
+set type 2 charge 3.721719
+set type 4 charge 24.147772
+run 300000
+set type 2 charge 3.721781
+set type 4 charge 24.147862
+run 300000
+set type 2 charge 3.721841
+set type 4 charge 24.147950
+run 300000
+set type 2 charge 3.721900
+set type 4 charge 24.148037
+run 300000
+set type 2 charge 3.721958
+set type 4 charge 24.148122
+run 300000
+set type 2 charge 3.722015
+set type 4 charge 24.148205
+run 300000
+set type 2 charge 3.722071
+set type 4 charge 24.148287
+run 300000
+set type 2 charge 3.722125
+set type 4 charge 24.148367
+run 300000
+set type 2 charge 3.722179
+set type 4 charge 24.148445
+run 300000
+set type 2 charge 3.722231
+set type 4 charge 24.148522
+run 300000
+set type 2 charge 3.722283
+set type 4 charge 24.148597
+run 300000
+set type 2 charge 3.722333
+set type 4 charge 24.148671
+run 300000
+set type 2 charge 3.722383
+set type 4 charge 24.148744
+run 300000
+set type 2 charge 3.722431
+set type 4 charge 24.148815
+run 300000
+set type 2 charge 3.722478
+set type 4 charge 24.148884
+run 300000
+set type 2 charge 3.722525
+set type 4 charge 24.148952
+run 300000
+set type 2 charge 3.722570
+set type 4 charge 24.149019
+run 300000
+set type 2 charge 3.722615
+set type 4 charge 24.149085
+run 300000
+set type 2 charge 3.722659
+set type 4 charge 24.149149
+run 300000
+set type 2 charge 3.722702
+set type 4 charge 24.149212
+run 300000
+set type 2 charge 3.722744
+set type 4 charge 24.149274
+run 300000
+set type 2 charge 3.722785
+set type 4 charge 24.149334
+run 300000
+set type 2 charge 3.722826
+set type 4 charge 24.149393
+run 300000
+set type 2 charge 3.722865
+set type 4 charge 24.149451
+run 300000
+set type 2 charge 3.722904
+set type 4 charge 24.149508
+run 300000
+set type 2 charge 3.722942
+set type 4 charge 24.149564
+run 300000
+set type 2 charge 3.722980
+set type 4 charge 24.149619
+run 300000
+set type 2 charge 3.723016
+set type 4 charge 24.149673
+run 300000
+set type 2 charge 3.723052
+set type 4 charge 24.149725
+run 300000
+set type 2 charge 3.723087
+set type 4 charge 24.149777
+run 300000
+set type 2 charge 3.723122
+set type 4 charge 24.149827
+run 300000
+set type 2 charge 3.723155
+set type 4 charge 24.149877
+run 300000
+set type 2 charge 3.723188
+set type 4 charge 24.149925
+run 300000
+set type 2 charge 3.723221
+set type 4 charge 24.149973
+run 300000
+set type 2 charge 3.723253
+set type 4 charge 24.150020
+run 300000
+set type 2 charge 3.723284
+set type 4 charge 24.150065
+run 300000
+set type 2 charge 3.723314
+set type 4 charge 24.150110
+run 300000
+set type 2 charge 3.723344
+set type 4 charge 24.150154
+run 300000
+set type 2 charge 3.723374
+set type 4 charge 24.150197
+run 300000
+set type 2 charge 3.723403
+set type 4 charge 24.150239
+run 300000
+set type 2 charge 3.723431
+set type 4 charge 24.150281
+run 300000
+set type 2 charge 3.723458
+set type 4 charge 24.150321
+run 300000
+set type 2 charge 3.723486
+set type 4 charge 24.150361
+run 300000
+set type 2 charge 3.723512
+set type 4 charge 24.150400
+run 300000
+set type 2 charge 3.723538
+set type 4 charge 24.150438
+run 300000
+set type 2 charge 3.723564
+set type 4 charge 24.150475
+run 300000
+set type 2 charge 3.723589
+set type 4 charge 24.150512
+run 300000
+set type 2 charge 3.723613
+set type 4 charge 24.150548
+run 300000
+set type 2 charge 3.723637
+set type 4 charge 24.150583
+run 300000
+set type 2 charge 3.723661
+set type 4 charge 24.150618
+run 300000
+set type 2 charge 3.723684
+set type 4 charge 24.150652
+run 300000
+set type 2 charge 3.723707
+set type 4 charge 24.150685
+run 300000
+set type 2 charge 3.723729
+set type 4 charge 24.150717
+run 300000
+set type 2 charge 3.723751
+set type 4 charge 24.150749
+run 300000
+set type 2 charge 3.723772
+set type 4 charge 24.150781
+run 300000
+set type 2 charge 3.723793
+set type 4 charge 24.150811
+run 300000
+set type 2 charge 3.723813
+set type 4 charge 24.150841
+run 300000
+set type 2 charge 3.723833
+set type 4 charge 24.150871
+run 300000
+set type 2 charge 3.723853
+set type 4 charge 24.150900
+run 300000
+set type 2 charge 3.723872
+set type 4 charge 24.150928
+run 300000
+set type 2 charge 3.723891
+set type 4 charge 24.150956
+run 300000
+set type 2 charge 3.723910
+set type 4 charge 24.150983
+run 300000
+set type 2 charge 3.723928
+set type 4 charge 24.151009
+run 300000
+set type 2 charge 3.723946
+set type 4 charge 24.151036
+run 300000
+set type 2 charge 3.723963
+set type 4 charge 24.151061
+run 300000
+set type 2 charge 3.723980
+set type 4 charge 24.151086
+run 300000
+set type 2 charge 3.723997
+set type 4 charge 24.151111
+run 300000
+set type 2 charge 3.724014
+set type 4 charge 24.151135
+run 300000
+set type 2 charge 3.724030
+set type 4 charge 24.151159
+run 300000
+set type 2 charge 3.724045
+set type 4 charge 24.151182
+run 300000
+set type 2 charge 3.724061
+set type 4 charge 24.151204
+run 300000
+set type 2 charge 3.724076
+set type 4 charge 24.151227
+run 300000
+set type 2 charge 3.724091
+set type 4 charge 24.151249
+run 300000
+set type 2 charge 3.724106
+set type 4 charge 24.151270
+run 300000
+set type 2 charge 3.724120
+set type 4 charge 24.151291
+run 300000
+set type 2 charge 3.724134
+set type 4 charge 24.151311
+run 300000
+set type 2 charge 3.724148
+set type 4 charge 24.151332
+run 300000
+set type 2 charge 3.724161
+set type 4 charge 24.151351
+run 300000
+set type 2 charge 3.724174
+set type 4 charge 24.151371
+run 300000
+set type 2 charge 3.724187
+set type 4 charge 24.151390
+run 300000
+set type 2 charge 3.724200
+set type 4 charge 24.151408
+run 300000
+set type 2 charge 3.724212
+set type 4 charge 24.151426
+run 300000
+set type 2 charge 3.724225
+set type 4 charge 24.151444
+run 300000
+set type 2 charge 3.724236
+set type 4 charge 24.151462
+run 300000
+set type 2 charge 3.724248
+set type 4 charge 24.151479
+run 300000
+set type 2 charge 3.724260
+set type 4 charge 24.151496
+run 300000
+
+
+##################################################
+
+write_data      data.${simname}
+write_restart	restart/restart.${simname}
+
+
+
