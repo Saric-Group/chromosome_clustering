@@ -23,4 +23,4 @@ Once equilibration is completed, the restart file produced can be used to perfor
 
 ## How to cite this material
 
-When citing this material, reference the original work and the following DOI: 10.5281/zenodo.12706119 
+When citing this material, reference the original work and the following DOI: 10.5281/zenodo.12706118 .
