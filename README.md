@@ -21,6 +21,8 @@ Each folder contains an "equilibration" sub-folder and a "production" sub-folder
 
 Once equilibration is completed, the restart file produced can be used to perform the production run. During production, the charge distribution of the Ki-67 molecules is gradually changed using the sigmoidal function described in bioRxiv 2023.11.23.568026. 
 
+The code was originally wrote for and run with LAMMPS stable version 23.06.2022
+
 ## How to cite this material
 
 When citing this material, reference the original work and the following DOI: 10.5281/zenodo.12706119 (v1).
