@@ -71,7 +71,7 @@ group 			polymers 	type 2 3 4
 
 #BONDS AND ANGLES
 bond_coeff    	1 30.0 1.5 1.0 1.0 
-angle_coeff	  	1 -${angle_energy} 3.141693
+angle_coeff	  	1 -${angle_energy} 0
 
 #SET TIME STEP
 timestep		${tstep}
