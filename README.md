@@ -3,9 +3,8 @@ LAMMPS and Python codes for simulations of Ki-67 and RNA mediated chromosome clu
 
 The simulation model is described in detail in:
 
-A liquid-like coat mediates chromosome clustering during mitotic exit
-Alberto Hernandez-Armendariz, Valerio Sorichetti, Yuki Hayashi, Andreas Brunner, Jan Ellenberg, Anđela Šarić, Sara Cuylen-Haering
-bioRxiv 2023.11.23.568026; doi: https://doi.org/10.1101/2023.11.23.568026 
+_A liquid-like coat mediates chromosome clustering during mitotic exit_
+Alberto Hernandez-Armendariz, Valerio Sorichetti, Yuki Hayashi, Zuzana Koskova, Andreas Brunner, Jan Ellenberg, Anđela Šarić, Sara Cuylen-Haering, [Molecular Cell, Volume 84, Issue 17, (2024)](https://doi.org/10.1016/j.molcel.2024.07.022) 
 
 ## What this repository contains
 
