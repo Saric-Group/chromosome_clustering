@@ -24,4 +24,4 @@ The code was originally wrote for and run with LAMMPS stable version 23.06.2022
 
 ## How to cite this material
 
-When citing this material, reference the original work and the following DOI: 10.5281/zenodo.12706119 (v1).
+When citing this material, reference the original work and the following DOI: [10.5281/zenodo.12706119](https://doi.org/10.5281/zenodo.13961010) (v2).
